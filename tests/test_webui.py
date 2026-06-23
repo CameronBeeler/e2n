@@ -681,3 +681,59 @@ def test_resolve_decrypt_post_wrong_passphrase_shows_error(client, tmp_path) -> 
     )
     assert response.status_code == 200
     assert "error" in response.text.lower() or "failed" in response.text.lower() or "wrong" in response.text.lower()
+
+
+
+# --- Decrypt and permanently import to Notion ---
+
+
+def test_resolve_decrypt_and_import_replaces_block(client, tmp_path) -> None:
+    """POST /resolve/decrypt-import/{note_id} should decrypt, create paragraph block, delete marker."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding
+    import base64, hashlib, os
+
+    passphrase = "testpass"
+    plaintext = b"My decrypted secret content here"
+    key = hashlib.md5(passphrase.encode("utf-8")).digest()
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(plaintext) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    ciphertext = cipher.encryptor().update(padded) + cipher.encryptor().finalize()
+    # Re-encrypt properly (encryptor consumed)
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+    encrypted_b64 = base64.b64encode(iv + ciphertext).decode()
+
+    source = tmp_path / "DI.enex"
+    source.write_text(
+        f'<?xml version="1.0"?><en-export><note><title>Locked Note</title>'
+        f'<content><![CDATA[<?xml version="1.0"?><en-note>'
+        f'<en-crypt hint="test" cipher="AES" length="128">{encrypted_b64}</en-crypt>'
+        f'</en-note>]]></content></note></en-export>',
+        encoding="utf-8",
+    )
+    proc_dir = tmp_path / "proc"
+    client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
+
+    from unittest.mock import patch, MagicMock
+    mock_client = MagicMock()
+    mock_client.search_pages.return_value = []
+    mock_client.delete_block.return_value = None
+    mock_client._sdk_client = MagicMock()
+    mock_client._sdk_client.blocks.children.append.return_value = {"results": [{"id": "new-blk"}]}
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+    client.post("/wizard/step/3")
+
+    with patch("e2n.webui.app.NotionClient", return_value=mock_client):
+        response = client.post(
+            "/resolve/decrypt-import/note_000001",
+            data={"passphrase": passphrase, "block_id": "marker-blk-1", "page_id": "page-1"},
+        )
+
+    assert response.status_code in (200, 302, 303)
+    # Should have called delete_block to remove marker
+    mock_client.delete_block.assert_called_once_with("marker-blk-1")

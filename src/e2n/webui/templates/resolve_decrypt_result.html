@@ -13,6 +13,14 @@
 <p><em>This content is shown in your browser only. It is not stored anywhere.</em></p>
 
 <h3>What would you like to do?</h3>
+<form method="post" action="/resolve/decrypt-import/{{ note_id }}" style="display:inline; margin-right:1em;">
+  <input type="hidden" name="passphrase" value="">
+  <input type="hidden" name="block_id" value="">
+  <input type="hidden" name="page_id" value="">
+  <button type="submit" onclick="return confirm('⚠️ This content will be visible to anyone with workspace access. Notion does not support encryption. Continue?')">
+    Permanently decrypt in Notion
+  </button>
+</form>
 <form method="post" action="/resolve/delete-block" style="display:inline">
   <input type="hidden" name="block_id" value="">
   <input type="hidden" name="note_id" value="{{ note_id }}">

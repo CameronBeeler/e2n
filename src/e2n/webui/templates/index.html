@@ -3,137 +3,34 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>e2n Local Control Room</title>
+    <title>e2n — Evernote to Notion Migration</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <div class="noise"></div>
     <main class="layout">
       <header class="hero">
-        <p class="eyebrow">Local-Only Deployment</p>
-        <h1>e2n Control Room</h1>
-        <p class="subtitle">
-          Run extraction, import, resume, and wipe actions from your own machine.
-          All state remains in your local processing directories.
-        </p>
+        <h1>e2n</h1>
+        <p class="subtitle">Evernote to Notion Migration Tool</p>
+        <p>Migrate your Evernote notebooks to Notion — preserving content, formatting, attachments, and structure.</p>
       </header>
 
-      {% if message %}
-      <section class="flash flash-ok">{{ message }}</section>
-      {% endif %}
-      {% if error %}
-      <section class="flash flash-error">{{ error }}</section>
-      {% endif %}
-
       <section class="panel">
-        <h2>Extraction</h2>
-        <form method="post" action="/extract" class="form-grid">
-          <label>
-            ENEX Source (file or directory)
-            <input type="text" name="enex_source" required placeholder="~/Downloads/Imports/Notebooks" />
-          </label>
-          <label>
-            Processing Directory
-            <input type="text" name="processing_dir" value="{{ processing_dir }}" required />
-          </label>
-          <button type="submit">Run Extraction</button>
-        </form>
+        <h2>Get Started</h2>
+        <p>The migration wizard guides you through the process step by step.</p>
+        <a href="/wizard/" class="button">Start Migration Wizard →</a>
       </section>
 
       <section class="panel">
-        <h2>Notion Import</h2>
-        <form method="post" action="/import" class="form-grid">
-          <label>
-            ENEX Source (file or directory)
-            <input type="text" name="enex_source" required placeholder="~/Downloads/Imports/Notebooks" />
-          </label>
-          <label>
-            Processing Directory
-            <input type="text" name="processing_dir" value="{{ processing_dir }}" required />
-          </label>
-          <label>
-            Notion Key
-            <input type="password" name="notion_key" required placeholder="secret_xxx" />
-          </label>
-          <label>
-            Notion Root (optional)
-            <input type="text" name="notion_root" placeholder="Migration Root" />
-          </label>
-          <label class="checkbox">
-            <input type="checkbox" name="resume" />
-            Resume previously committed run
-          </label>
-          <button type="submit">Run Import Queue</button>
-        </form>
+        <h2>Resolution Workbench</h2>
+        <p>After importing, resolve exceptions — fix broken links, decrypt protected content, and attach missing files.</p>
+        <a href="/resolve/" class="button button-secondary">Open Workbench →</a>
       </section>
 
       <section class="panel">
-        <h2>Run Controls</h2>
-        <form method="post" action="/run-control" class="form-grid">
-          <label>
-            Action
-            <select name="action" required>
-              <option value="reset">Reset Run</option>
-              <option value="wipe-local">Wipe Local</option>
-              <option value="wipe-remote">Wipe Remote</option>
-            </select>
-          </label>
-          <label>
-            Run ID
-            <input type="text" name="run_id" required placeholder="run-20260530T120102.999999Z" />
-          </label>
-          <label>
-            ENEX Source (same source used for run)
-            <input type="text" name="enex_source" required placeholder="~/Downloads/Imports/Notebooks/Enduring.enex" />
-          </label>
-          <label>
-            Processing Directory
-            <input type="text" name="processing_dir" value="{{ processing_dir }}" required />
-          </label>
-          <label>
-            Notion Key (needed for wipe-remote)
-            <input type="password" name="notion_key" placeholder="secret_xxx" />
-          </label>
-          <label>
-            Notion Root (optional)
-            <input type="text" name="notion_root" placeholder="Migration Root" />
-          </label>
-          <button type="submit">Apply Run Control</button>
-        </form>
-      </section>
-
-      <section class="panel">
-        <h2>Local Run Dashboard</h2>
-        <form method="get" action="/" class="inline-form">
-          <label>
-            Processing Directory
-            <input type="text" name="processing_dir" value="{{ processing_dir }}" required />
-          </label>
-          <button type="submit">Refresh</button>
-        </form>
-
-        {% if cards %}
-        <div class="cards">
-          {% for card in cards %}
-          <article class="card">
-            <h3>{{ card.source_name }}</h3>
-            <p><strong>Latest Run:</strong> {{ card.latest_run_id or "(none)" }}</p>
-            <p><strong>Output:</strong> {{ card.output_directory }}</p>
-            <p><strong>State:</strong> {{ card.state_path }}</p>
-            <div class="metrics">
-              <span>Notes: {{ card.note_count }}</span>
-              <span>Extracted: {{ card.extracted_count }}</span>
-              <span>Extract Errors: {{ card.extraction_error_count }}</span>
-              <span>Committed Ops: {{ card.committed_count }}</span>
-              <span>Pending Ops: {{ card.pending_count }}</span>
-              <span>Failed Ops: {{ card.failed_count }}</span>
-            </div>
-          </article>
-          {% endfor %}
-        </div>
-        {% else %}
-        <p class="empty">No state.db files found under this processing directory yet.</p>
-        {% endif %}
+        <h2>Status</h2>
+        <p>Check progress on an active migration.</p>
+        <a href="/wizard/progress" class="button button-secondary">View Progress (JSON)</a>
       </section>
     </main>
   </body>

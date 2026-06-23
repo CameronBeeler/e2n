@@ -45,19 +45,8 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 
     @app.get("/", response_class=HTMLResponse)
-    def index(request: Request, processing_dir: str = "./processing", message: str = "", error: str = "") -> HTMLResponse:
-        processing_directory = Path(processing_dir).expanduser().resolve()
-        cards = _collect_run_cards(processing_directory)
-        return templates.TemplateResponse(
-            request=request,
-            name="index.html",
-            context={
-                "processing_dir": str(processing_directory),
-                "cards": cards,
-                "message": message,
-                "error": error,
-            },
-        )
+    def index(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(request=request, name="index.html")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -579,6 +568,79 @@ def create_app() -> FastAPI:
                 name="resolve_decrypt_result.html",
                 context={"note_id": note_id, "hint": hint, "error": "Decryption failed — wrong passphrase or corrupted data.", "decrypted": ""},
             )
+
+    @app.post("/resolve/decrypt-import/{note_id}")
+    def resolve_decrypt_import(
+        request: Request,
+        note_id: str,
+        passphrase: str = Form(...),
+        block_id: str = Form(""),
+        page_id: str = Form(""),
+    ):
+        """Decrypt content, insert as paragraph block at marker position, delete marker."""
+        import base64 as _b64
+        import hashlib as _hashlib
+
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        encrypted_b64 = ""
+        key_length = 128
+
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    length_str = crypt_el.attrib.get("length", "128")
+                                    key_length = int(length_str) if length_str.isdigit() else 128
+                                    encrypted_b64 = (crypt_el.text or "").strip()
+                                    break
+                        except Exception:
+                            pass
+                    break
+
+        if not encrypted_b64:
+            return RedirectResponse(url=f"/resolve/decrypt/{note_id}", status_code=303)
+
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives import padding
+
+            raw = _b64.b64decode(encrypted_b64)
+            key = _hashlib.md5(passphrase.encode("utf-8")).digest()[:key_length // 8]
+            iv = raw[:16]
+            ciphertext = raw[16:]
+
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            padded = decryptor.update(ciphertext) + decryptor.finalize()
+            unpadder = padding.PKCS7(128).unpadder()
+            decrypted_text = (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+        except Exception:
+            return RedirectResponse(url=f"/resolve/decrypt/{note_id}", status_code=303)
+
+        # Insert decrypted content as paragraph block and delete marker
+        notion_key = _wizard_state.get("notion_key", "")
+        if notion_key and page_id:
+            from e2n.notion import paragraph_block, plain_text_span
+            client = NotionClient(notion_key)
+            block = paragraph_block([plain_text_span(decrypted_text[:2000])])
+            client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
+            if block_id:
+                client.delete_block(block_id)
+
+        return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.get("/wizard/progress")
     def wizard_progress():
