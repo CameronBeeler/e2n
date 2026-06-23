@@ -173,11 +173,7 @@ def create_app() -> FastAPI:
             _wizard_state["notion_key"] = notion_key
             _wizard_state["notion_root"] = notion_root
             _wizard_state["step2_complete"] = "true"
-            return templates.TemplateResponse(
-                request=request,
-                name="wizard_step2.html",
-                context={"error": "", "success": "Connected successfully."},
-            )
+            return RedirectResponse(url="/wizard/step/3", status_code=303)
         except Exception as exc:
             return templates.TemplateResponse(
                 request=request,

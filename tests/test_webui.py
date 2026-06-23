@@ -78,7 +78,7 @@ def test_wizard_step_2_shows_notion_config(client, tmp_path) -> None:
 
 
 def test_wizard_step_2_post_test_connection_success(client, tmp_path, monkeypatch) -> None:
-    """POST /wizard/step/2 with valid key should report connection success."""
+    """POST /wizard/step/2 with valid key should advance to step 3."""
     # Complete step 1 first
     source = tmp_path / "Test.enex"
     source.write_text("<en-export></en-export>", encoding="utf-8")
@@ -96,10 +96,8 @@ def test_wizard_step_2_post_test_connection_success(client, tmp_path, monkeypatc
             follow_redirects=False,
         )
 
-    assert response.status_code in (200, 302, 303)
-    # If 200, should show success; if redirect, step 2 is complete
-    if response.status_code == 200:
-        assert "success" in response.text.lower() or "connected" in response.text.lower()
+    assert response.status_code == 303
+    assert "step/3" in response.headers.get("location", "")
 
 
 def test_wizard_step_2_post_test_connection_failure(client, tmp_path, monkeypatch) -> None:
