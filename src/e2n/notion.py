@@ -656,7 +656,11 @@ def bootstrap_notion_pages(
     shared_pages = notion.search_pages(root_title)
     root = _select_root_page(shared_pages, root_title)
     if root is None:
-        root = notion.create_workspace_page(root_title)
+        raise ValueError(
+            f"Could not find a Notion page titled {root_title!r}. "
+            f"Please create a page with that title in Notion and share it with your integration "
+            f"(page → ··· → Connections → Add your integration)."
+        )
     all_visible_pages = notion.search_pages()
 
     converted = _find_child_page(all_visible_pages, root.page_id, converted_title)

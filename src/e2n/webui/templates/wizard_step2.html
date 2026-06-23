@@ -8,9 +8,10 @@
 <form method="post" action="/wizard/step/2">
   <label>Notion Integration Key:</label>
   <input type="password" name="notion_key" required>
-  <label>Notion Root Page (optional):</label>
-  <input type="text" name="notion_root">
-  <button type="submit">Test Connection</button>
+  <label>Notion Root Page:</label>
+  <input type="text" name="notion_root" required placeholder="e.g. Evernote Migration">
+  <p class="help">Enter the exact title of a Notion page you've shared with your integration. The import structure will be created under this page.</p>
+  <button type="submit">Connect →</button>
 </form>
 </body>
 </html>
