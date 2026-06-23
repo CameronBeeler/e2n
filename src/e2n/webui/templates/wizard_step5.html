@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n Wizard - Review Exceptions</title></head>
+<body>
+<h1>Step 5: Review Exceptions</h1>
+{% if total == 0 %}
+<p class="success">Import complete — no exceptions found!</p>
+{% else %}
+<p>{{ total }} exception(s) found during import:</p>
+<table>
+  <thead><tr><th>Note</th><th>Reasons</th></tr></thead>
+  <tbody>
+  {% for exc in exceptions %}
+    <tr><td>{{ exc.title }}</td><td>{{ exc.reasons }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p>Use the <a href="/resolve/">Exception Resolution Workbench</a> to address these.</p>
+{% endif %}
+</body>
+</html>

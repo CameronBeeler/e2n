@@ -135,3 +135,115 @@ def test_discover_enex_sources_returns_sorted_directory_children(tmp_path: Path)
     ignored.write_text("ignored", encoding="utf-8")
 
     assert discover_enex_sources(source_directory) == [first.resolve(), second.resolve()]
+
+
+# --- GAP-1/4: Resource extraction to filesystem ---
+
+
+def test_extract_enex_notes_writes_resources_to_disk(tmp_path: Path) -> None:
+    """Resources should be decoded from base64 and written to resources/ directory."""
+    import base64
+
+    image_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50  # fake PNG header
+    encoded = base64.b64encode(image_data).decode()
+
+    source = tmp_path / "WithResource.enex"
+    source.write_text(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<en-export>
+  <note>
+    <title>Resource Note</title>
+    <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?><en-note><en-media hash="abc123" type="image/png"/></en-note>]]></content>
+    <resource>
+      <data encoding="base64">{encoded}</data>
+      <mime>image/png</mime>
+      <resource-attributes>
+        <file-name>screenshot.png</file-name>
+      </resource-attributes>
+    </resource>
+  </note>
+</en-export>
+""",
+        encoding="utf-8",
+    )
+
+    result = extract_enex_notes(source, tmp_path / "processing")
+    resources_dir = tmp_path / "processing" / "WithResource" / "resources"
+
+    assert result.success_count == 1
+    # Resource file should exist with original filename
+    resource_file = resources_dir / "screenshot.png"
+    assert resource_file.exists(), f"Expected resource at {resource_file}, found: {list(resources_dir.iterdir())}"
+    assert resource_file.read_bytes() == image_data
+
+
+def test_extract_enex_notes_creates_resource_manifest(tmp_path: Path) -> None:
+    """A manifest mapping hash -> filepath should be created for downstream lookup."""
+    import base64
+    import hashlib
+
+    data = b"PDF content here"
+    encoded = base64.b64encode(data).decode()
+    md5_hash = hashlib.md5(data).hexdigest()
+
+    source = tmp_path / "Manifest.enex"
+    source.write_text(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<en-export>
+  <note>
+    <title>PDF Note</title>
+    <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?><en-note><en-media hash="{md5_hash}" type="application/pdf"/></en-note>]]></content>
+    <resource>
+      <data encoding="base64">{encoded}</data>
+      <mime>application/pdf</mime>
+      <resource-attributes>
+        <file-name>document.pdf</file-name>
+      </resource-attributes>
+    </resource>
+  </note>
+</en-export>
+""",
+        encoding="utf-8",
+    )
+
+    extract_enex_notes(source, tmp_path / "processing")
+    manifest_path = tmp_path / "processing" / "Manifest" / "resources" / "manifest.json"
+
+    assert manifest_path.exists()
+    import json
+    manifest = json.loads(manifest_path.read_text())
+    assert md5_hash in manifest
+    assert manifest[md5_hash].endswith("document.pdf")
+
+
+def test_extract_enex_notes_resource_without_filename_uses_hash(tmp_path: Path) -> None:
+    """Resources without file-name attribute should use {hash}.{ext} naming."""
+    import base64
+    import hashlib
+
+    data = b"audio data"
+    encoded = base64.b64encode(data).decode()
+    md5_hash = hashlib.md5(data).hexdigest()
+
+    source = tmp_path / "NoName.enex"
+    source.write_text(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<en-export>
+  <note>
+    <title>Audio Note</title>
+    <content><![CDATA[<?xml version="1.0" encoding="UTF-8"?><en-note><en-media hash="{md5_hash}" type="audio/mpeg"/></en-note>]]></content>
+    <resource>
+      <data encoding="base64">{encoded}</data>
+      <mime>audio/mpeg</mime>
+    </resource>
+  </note>
+</en-export>
+""",
+        encoding="utf-8",
+    )
+
+    extract_enex_notes(source, tmp_path / "processing")
+    resources_dir = tmp_path / "processing" / "NoName" / "resources"
+
+    expected_file = resources_dir / f"{md5_hash}.mpeg"
+    assert expected_file.exists(), f"Expected {expected_file}, found: {list(resources_dir.iterdir())}"

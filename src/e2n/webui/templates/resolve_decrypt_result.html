@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n - Decrypt Result</title></head>
+<body>
+<h1>Decrypt Result: {{ note_id }}</h1>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+<p><a href="/resolve/decrypt/{{ note_id }}">← Try again</a></p>
+{% else %}
+<h2>Decrypted Content</h2>
+<pre class="decrypted-content">{{ decrypted }}</pre>
+<p><em>This content is shown in your browser only. It is not stored anywhere.</em></p>
+
+<h3>What would you like to do?</h3>
+<form method="post" action="/resolve/delete-block" style="display:inline">
+  <input type="hidden" name="block_id" value="">
+  <input type="hidden" name="note_id" value="{{ note_id }}">
+  <button type="submit" onclick="return confirm('This will permanently delete the encrypted block from Notion. Cannot undo.')">
+    Delete block from Notion
+  </button>
+</form>
+{% endif %}
+
+<p><a href="/resolve/">← Back to dashboard</a></p>
+</body>
+</html>

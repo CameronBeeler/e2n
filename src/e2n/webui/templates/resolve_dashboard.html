@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n - Exception Resolution Workbench</title></head>
+<body>
+<h1>Exception Resolution Workbench</h1>
+<p>{{ total }} exception(s) to resolve.</p>
+
+<h2>By Type</h2>
+<ul>
+{% for reason, count in categories.items() %}
+  <li><a href="/resolve/type/{{ reason | lower | replace(' ', '-') }}">{{ reason }}</a> ({{ count }})</li>
+{% endfor %}
+</ul>
+
+<h2>By Page</h2>
+<ul>
+{% for note_id, count in pages.items() %}
+  <li><a href="/resolve/page/{{ note_id }}">{{ note_id }}</a> ({{ count }} exception{{ 's' if count > 1 else '' }})</li>
+{% endfor %}
+</ul>
+</body>
+</html>

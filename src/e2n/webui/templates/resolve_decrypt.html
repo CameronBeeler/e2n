@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n - Decrypt Encrypted Content</title></head>
+<body>
+<h1>Decrypt: {{ note_id }}</h1>
+
+{% if hint %}
+<p><strong>Passphrase hint:</strong> {{ hint }}</p>
+{% endif %}
+
+<form method="post" action="/resolve/decrypt/{{ note_id }}">
+  <label>Enter passphrase:</label>
+  <input type="password" name="passphrase" required>
+  <button type="submit">Decrypt</button>
+</form>
+
+<p>After decryption, you will be able to:</p>
+<ul>
+  <li>View and copy the decrypted content</li>
+  <li>Permanently decrypt in Notion ⚠️ (visible to anyone with workspace access)</li>
+  <li>Delete the entire block from Notion (cannot undo)</li>
+</ul>
+
+<p><a href="/resolve/">← Back to dashboard</a></p>
+</body>
+</html>

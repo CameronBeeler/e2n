@@ -347,7 +347,101 @@ def _execute_notion_operation(notion: NotionClient, operation: OperationRecord) 
         )
         return page.page_id
 
+    if operation.operation_type == "import_note":
+        return _execute_import_note(notion, payload)
+
     raise ValueError(f"Unsupported operation type: {operation.operation_type}")
+
+
+def _execute_import_note(notion: NotionClient, payload: dict) -> str:
+    """Parse a note file, build Notion blocks, upload resources, and create the page."""
+    import json as _json
+    from e2n.enml import plan_enml_segments
+    from e2n.notion import segments_to_notion_blocks
+
+    note_file = Path(payload["note_file"])
+    resources_dir = Path(payload["resources_directory"])
+    database_id = str(payload["database_id"])
+    title = str(payload["title"])
+    tags = tuple(str(t) for t in payload.get("tags", []))
+
+    # Parse ENML content from the note file
+    from lxml import etree
+
+    tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
+    root = tree.getroot()
+    note_el = root.find("note") if root.tag != "note" else root
+    content_el = note_el.find("content") if note_el is not None else None
+    content_text = content_el.text or "" if content_el is not None else ""
+
+    # Plan segments
+    segments = plan_enml_segments(content_text)
+
+    # Load resource manifest and upload files
+    manifest_path = resources_dir / "manifest.json"
+    resource_manifest: dict[str, str] = {}
+    if manifest_path.exists():
+        resource_manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    # Upload referenced resources and build resource_map (hash → url/upload_id)
+    resource_map: dict[str, str] = {}
+    for segment in segments:
+        if segment.kind == "resource" and segment.value and segment.value in resource_manifest:
+            local_path = Path(resource_manifest[segment.value])
+            if local_path.exists():
+                upload_id = notion.upload_file(local_path)
+                resource_map[segment.value] = upload_id
+
+    # Convert segments to Notion blocks
+    blocks, _exceptions = segments_to_notion_blocks(
+        segments, resource_map, note_id=payload.get("note_id", ""), note_title=title
+    )
+
+    # Create page with blocks (performance: first 100 in page create)
+    page_id = notion.import_note_blocks(
+        database_id=database_id,
+        title=title,
+        tags=tags,
+        blocks=blocks,
+    )
+
+    # Create exception rows for any issues found during block conversion
+    exception_database_id = payload.get("exception_database_id", "")
+    if _exceptions and exception_database_id:
+        from e2n.notion import create_exception_row as _create_exc_row
+
+        # Get block IDs to build block-level URLs (no scanning — direct list after our own append)
+        page_id_clean = page_id.replace("-", "")
+        marker_block_ids: list[str] = []
+        try:
+            children = notion.list_block_children(page_id)
+            marker_block_ids = [b["id"] for b in children if b.get("type") == "callout"]
+        except Exception:
+            pass  # If listing fails, fall back to page-level URLs
+
+        for i, exc in enumerate(_exceptions):
+            # Block-level URL if we have a matching marker block_id
+            if i < len(marker_block_ids):
+                block_id_clean = marker_block_ids[i].replace("-", "")
+                exc_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+            else:
+                exc_url = f"https://www.notion.so/{page_id_clean}"
+
+            reasons = exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)
+            error_msg = exc.error_comment if hasattr(exc, "error_comment") else exc.marker_text
+            _create_exc_row(
+                notion,
+                exception_database_id=exception_database_id,
+                note_name=title,
+                reasons=tuple(str(r) for r in reasons),
+                error_message=error_msg,
+                source_file=str(payload.get("source_file", "")),
+                link_text=getattr(exc, "link_text", ""),
+                link_value=getattr(exc, "link_value", ""),
+                page_url=exc_url,
+            )
+
+    return page_id
 
 
 def main(argv: list[str] | None = None) -> int:

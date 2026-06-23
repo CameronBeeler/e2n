@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from e2n.exceptions import EvernoteEmbeddedLinkRecord, UnsupportedContentRecord
@@ -94,6 +95,74 @@ def file_block(url: str, filename: str = "") -> JsonObject:
     return payload
 
 
+def heading_block(text: str, level: int = 1) -> JsonObject:
+    """Build a Notion heading block (level 1-3)."""
+    level = max(1, min(3, level))
+    key = f"heading_{level}"
+    return {"object": "block", "type": key, key: {"rich_text": [plain_text_span(text)]}}
+
+
+def bulleted_list_item_block(text: str) -> JsonObject:
+    """Build a Notion bulleted list item block."""
+    return {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": [plain_text_span(text)]}}
+
+
+def numbered_list_item_block(text: str) -> JsonObject:
+    """Build a Notion numbered list item block."""
+    return {"object": "block", "type": "numbered_list_item", "numbered_list_item": {"rich_text": [plain_text_span(text)]}}
+
+
+def quote_block(text: str) -> JsonObject:
+    """Build a Notion quote block."""
+    return {"object": "block", "type": "quote", "quote": {"rich_text": [plain_text_span(text)]}}
+
+
+def code_block(text: str, language: str = "plain text") -> JsonObject:
+    """Build a Notion code block."""
+    return {"object": "block", "type": "code", "code": {"rich_text": [plain_text_span(text)], "language": language}}
+
+
+def divider_block() -> JsonObject:
+    """Build a Notion divider block."""
+    return {"object": "block", "type": "divider", "divider": {}}
+
+
+def todo_block(text: str, checked: bool = False) -> JsonObject:
+    """Build a Notion to_do block."""
+    return {"object": "block", "type": "to_do", "to_do": {"rich_text": [plain_text_span(text)], "checked": checked}}
+
+
+def table_block(rows: list[list[str]]) -> JsonObject:
+    """Build a Notion table block with table_row children."""
+    width = max(len(row) for row in rows) if rows else 0
+    children = []
+    for row in rows:
+        cells = [[plain_text_span(cell)] for cell in row]
+        # Pad short rows
+        while len(cells) < width:
+            cells.append([plain_text_span("")])
+        children.append({"object": "block", "type": "table_row", "table_row": {"cells": cells}})
+    return {
+        "object": "block",
+        "type": "table",
+        "table": {"table_width": width, "has_column_header": True, "has_row_header": False, "children": children},
+    }
+
+
+def annotated_text_span(text: str, annotations: dict) -> JsonObject:
+    """Build a Notion rich_text span with formatting annotations."""
+    span = plain_text_span(text)
+    span["annotations"] = {
+        "bold": annotations.get("bold", False),
+        "italic": annotations.get("italic", False),
+        "strikethrough": annotations.get("strikethrough", False),
+        "underline": annotations.get("underline", False),
+        "code": annotations.get("code", False),
+        "color": "default",
+    }
+    return span
+
+
 # ---------------------------------------------------------------------------
 # Block decomposition (REQ-BLOCK-02, REQ-BLOCK-03, REQ-LINK-01, REQ-LINK-02,
 #                      REQ-UNSUPPORTED-01)
@@ -144,11 +213,53 @@ def segments_to_notion_blocks(
         kind = segment.kind
 
         if kind == "text":
-            pending_inline.append(plain_text_span(segment.text))
+            if segment.annotations:
+                pending_inline.append(annotated_text_span(segment.text, segment.annotations))
+            else:
+                pending_inline.append(plain_text_span(segment.text))
 
         elif kind == "http_link":
             # Inline link annotation — stays within the surrounding paragraph run.
             pending_inline.append(link_text_span(segment.text, segment.value))
+
+        elif kind == "heading":
+            flush_inline()
+            blocks.append(heading_block(segment.text, segment.level))
+
+        elif kind == "bulleted_list":
+            flush_inline()
+            blocks.append(bulleted_list_item_block(segment.text))
+
+        elif kind == "numbered_list":
+            flush_inline()
+            blocks.append(numbered_list_item_block(segment.text))
+
+        elif kind == "quote":
+            flush_inline()
+            blocks.append(quote_block(segment.text))
+
+        elif kind == "code":
+            flush_inline()
+            blocks.append(code_block(segment.text))
+
+        elif kind == "divider":
+            flush_inline()
+            blocks.append(divider_block())
+
+        elif kind == "to_do":
+            flush_inline()
+            blocks.append(todo_block(segment.text, segment.checked))
+
+        elif kind == "encrypted":
+            flush_inline()
+            hint_msg = f" (hint: {segment.value})" if segment.value else ""
+            record = UnsupportedContentRecord(
+                note_id=note_id,
+                note_title=note_title,
+                error_comment=f"Encrypted content requires passphrase{hint_msg} — cannot be imported automatically",
+            )
+            exception_records.append(record)
+            blocks.append(unsupported_content_marker_block(record))
 
         elif kind == "evernote_link":
             # Cannot be resolved until all notes are imported (REQ-LINK-02).
@@ -179,9 +290,11 @@ def segments_to_notion_blocks(
                 blocks.append(file_block(url))
 
         elif kind == "table":
-            # HTML tables have no Notion block equivalent (REQ-BLOCK-03).
             flush_inline()
-            append_unsupported(segment, "HTML table — no Notion block equivalent; manual insertion required")
+            if hasattr(segment, "rows") and segment.rows:
+                blocks.append(table_block(segment.rows))
+            else:
+                append_unsupported(segment, "HTML table — no row data available; manual insertion required")
 
     flush_inline()
     return blocks, exception_records
@@ -363,6 +476,72 @@ class NotionClient:
         }
         return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
 
+    def upload_file(self, file_path: "Path") -> str:
+        """Upload a local file via Notion File Upload API and return the upload ID."""
+        # Step 1: Create upload object
+        create_response = self._sdk_call(
+            self._sdk_client.request, path="file_uploads", method="POST", body={}
+        )
+        upload_id = create_response["id"]
+
+        # Step 2: Send file contents
+        self._sdk_call(
+            self._sdk_client.request,
+            path=f"file_uploads/{upload_id}/send",
+            method="POST",
+            body={},
+            file=file_path,
+        )
+        return upload_id
+
+    def append_blocks_batched(self, page_id: str, blocks: list[JsonObject]) -> None:
+        """Append blocks to a page in Notion-safe batches of ≤100."""
+        for i in range(0, len(blocks), 100):
+            batch = blocks[i : i + 100]
+            self._sdk_call(
+                self._sdk_client.blocks.children.append,
+                block_id=page_id,
+                children=batch,
+            )
+
+    def import_note_blocks(
+        self,
+        database_id: str,
+        title: str,
+        tags: tuple[str, ...] | list[str],
+        blocks: list[JsonObject],
+    ) -> str:
+        """Create a database row with content blocks, using minimal API calls.
+
+        First 100 blocks are included in pages.create. Overflow is appended in batches.
+        Returns the created page_id.
+        """
+        initial = blocks[:100]
+        overflow = blocks[100:]
+
+        body: JsonObject = {
+            "parent": {"database_id": database_id},
+            "properties": {
+                "Name": {"title": [{"text": {"content": title}}]},
+                IMPORT_TAGS_PROPERTY: import_tags_property(tags),
+            },
+            "children": initial,
+        }
+        page = self._sdk_call(self._sdk_client.pages.create, **body)
+        page_id = page["id"]
+
+        if overflow:
+            self.append_blocks_batched(page_id, overflow)
+
+        return page_id
+
+    def delete_block(self, block_id: str) -> None:
+        """Delete a block by ID. Handles already-deleted blocks gracefully."""
+        try:
+            self._sdk_call(self._sdk_client.blocks.delete, block_id=block_id)
+        except NotionAPIError:
+            pass  # Block already deleted or not found — acceptable
+
     def _sdk_call(self, sdk_method: Any, **kwargs: Any) -> JsonObject:
         try:
             return sdk_method(**kwargs)
@@ -515,6 +694,41 @@ def ensure_child_database(
     if existing is not None:
         return existing
     return client.create_database(parent_page_id, database_title, properties)
+
+
+def create_exception_row(
+    client: NotionClient,
+    exception_database_id: str,
+    note_name: str,
+    reasons: tuple[str, ...] | list[str],
+    error_message: str = "",
+    source_file: str = "",
+    link_text: str = "",
+    link_value: str = "",
+    page_url: str = "",
+) -> str:
+    """Create one row in the Import-Exceptions database. Returns the row page_id."""
+    properties: JsonObject = {
+        "Note Name": {"title": [{"text": {"content": note_name}}]},
+        EXCEPTION_REASON_PROPERTY: exception_reason_property(reasons),
+    }
+    if error_message:
+        properties["Error Message"] = {"rich_text": [{"text": {"content": error_message[:2000]}}]}
+    if source_file:
+        properties["Source File"] = {"rich_text": [{"text": {"content": source_file[:2000]}}]}
+    if link_text:
+        properties["Linkable Text"] = {"rich_text": [{"text": {"content": link_text[:2000]}}]}
+    if link_value:
+        properties["Linkable Text"] = {"rich_text": [{"text": {"content": link_value[:2000]}}]}
+    if page_url:
+        properties["Link"] = {"url": page_url}
+
+    body: JsonObject = {
+        "parent": {"database_id": exception_database_id},
+        "properties": properties,
+    }
+    response = client._sdk_call(client._sdk_client.pages.create, **body)
+    return response["id"]
 
 
 def _select_root_page(pages: list[NotionPageRef], root_title: str | None) -> NotionPageRef:

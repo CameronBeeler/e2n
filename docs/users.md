@@ -1,188 +1,236 @@
 # User Instructions
 
-## Purpose
-
-This first version prepares Evernote export files for later Notion conversion. It reads one `.enex` file, or every `.enex` file in a source directory, extracts each note into its own file, and creates tracking files in a processing directory.
-
-Evernote export files are expected under:
-
-```text
-~/Downloads/Imports/Notebooks
-```
-
-## Supported operating systems
-
-The tool is intended to run on macOS, Ubuntu, and WSL. Use normal paths for your operating system. `~` is supported for your home directory.
-
-## Command
+## Quick Start
 
 ```bash
-e2n --converting -e ~/Downloads/Imports/Notebooks/Enduring.enex -d ./processing
+./start.sh
 ```
 
-When running from a source checkout before installing the package:
+That's it. The script checks your system, installs dependencies, and opens the wizard in your browser. See `docs/INSTALL.md` for manual installation if you prefer.
 
-```bash
-PYTHONPATH=src python -m e2n.cli --converting -e ~/Downloads/Imports/Notebooks/Enduring.enex -d ./processing
-```
+## What This Tool Does
 
-To run the local web interface:
+e2n migrates your Evernote notes to Notion — preserving content, formatting, attachments, and structure. Each Evernote notebook becomes a Notion database, and each note becomes a database entry with its full content as Notion blocks.
+
+## Supported Operating Systems
+
+macOS, Ubuntu, and WSL. Native Windows is not supported (use WSL).
+
+---
+
+## Two Ways to Use e2n
+
+### 1. WebUI Wizard (Recommended)
+
+The wizard walks you through the entire migration step by step:
 
 ```bash
 e2n-ui --open
+# Opens http://127.0.0.1:8787/wizard/
 ```
 
-If command shims are not refreshed yet, run:
+**Step 1 — Configure Source:** Point to your `.enex` file(s) and choose a processing directory.
+
+**Step 2 — Configure Notion:** Enter your Notion integration key and test the connection.
+
+**Step 3 — Extract:** Parse your Evernote export into individual notes and resources.
+
+**Step 4 — Import:** Upload everything to Notion (databases, pages, blocks, files).
+
+**Step 5 — Review:** See any exceptions that need attention, then use the Resolution Workbench to fix them.
+
+### 2. Command Line
+
+For automation or scripting, every operation is available via CLI:
 
 ```bash
-PYTHONPATH=src python -m e2n.webui.server --open
+# Extract notes from an ENEX file
+e2n --converting -e ~/Downloads/Notebooks/Enduring.enex -d ./processing
+
+# Create Notion page structure
+e2n --notion-bootstrap -n "My Migration" -k $NOTION_KEY
+
+# Create databases (one per notebook)
+e2n --notion-databases -e ~/Downloads/Notebooks -n "My Migration" -k $NOTION_KEY
+
+# Import notes into Notion
+e2n --notion-import -e ~/Downloads/Notebooks -d ./processing -n "My Migration" -k $NOTION_KEY
+
+# Auto-resolve Evernote links post-import
+e2n --resolve-evernote-links --exceptions-file ./processing/Enduring/exceptions.txt -k $NOTION_KEY
 ```
 
-By default, it listens on `http://127.0.0.1:8787`.
+---
 
-## Parameters
+## Resolution Workbench
 
-`--converting`
+After import, open the workbench to handle exceptions:
 
-Extract records from the `.enex` file. This is the only working mode in the first version.
-
-`--reporting`
-
-Accepted by the command line, but not implemented yet.
-
-`--resolve-evernote-links`
-
-Post-import resolver for embedded Evernote links. It reads `exceptions.txt`,
-uses each `Evernote Link` row's visible link text to search for an identically
-named Notion page/database row, and updates the warning placeholder block when a
-single exact match is found.
-
-`--notion-databases`
-
-Creates or reuses the Notion databases needed for import. Each `.enex` source
-gets one database named after the `.enex` file stem inside `Evernote Import`.
-The exception database is named `Import-Exceptions` inside
-`Evernote Import Exceptions`.
-
-`--notion-import`
-
-Imports extracted notes into each source database under `Evernote Import` using
-durable local queue state in `state.db`. Operations are rate-limited to respect
-Notion limits and can be resumed safely.
-
-`-e`, `--enex-source`
-
-The `.enex` file to read, or a directory containing `.enex` files. When a directory is provided, every direct child `*.enex` file is processed in sorted order.
-
-Example:
-
-```text
-~/Downloads/Imports/Notebooks/Enduring.enex
+```
+http://127.0.0.1:8787/resolve/
 ```
 
-`-d`, `--processing-directory`
+### Navigation Modes
 
-The parent directory for processing output. The tool creates a child directory named after the `.enex` file.
+- **By Type** — Work through all exceptions of one category (e.g., all Evernote Links)
+- **By Page** — Clean up one note at a time (all exception types for that note)
 
-Example:
+### Available Actions
 
-```text
-./processing
+| Exception Type | Resolution Options |
+|---|---|
+| **Evernote Links** | Auto-relink (batch single-match), or manual selection from candidates |
+| **Encrypted Content** | Enter passphrase → view decrypted content → permanently decrypt in Notion OR delete block |
+| **Failed Resources** | Re-upload from local file path |
+| **Empty Title / No Content** | Acknowledge (auto-dismiss) |
+| **Unsupported Content** | View in Notion → fix manually → confirm resolved |
+
+### Auto-Relink
+
+After importing all your notebooks, click "Auto-Relink" to batch-resolve Evernote links:
+- Searches Notion for pages matching each link's text
+- Single exact match → automatically resolved
+- Multiple matches → left for manual review
+- Zero matches → target note may not have been exported
+
+---
+
+## CLI Parameters
+
+### Modes
+
+| Flag | Purpose |
+|---|---|
+| `--converting` | Extract notes from ENEX into processing directory |
+| `--notion-bootstrap` | Create Notion root pages (Evernote Import + Exceptions) |
+| `--notion-databases` | Create one database per notebook |
+| `--notion-import` | Import extracted notes as Notion pages with blocks |
+| `--resolve-evernote-links` | Post-import Evernote link resolution |
+| `--rebuild-exceptions` | Rebuild exception projections from extraction artifacts |
+| `--reporting` | Reserved (not yet implemented) |
+
+### Common Options
+
+| Flag | Description |
+|---|---|
+| `-e`, `--enex-source` | Path to `.enex` file or directory of `.enex` files |
+| `-d`, `--processing-directory` | Where extraction output is written |
+| `-k`, `--notion-key` | Notion integration key (or set `NOTION_KEY` env var) |
+| `-n`, `--notion-root` | Notion parent page title for import structure |
+| `-w`, `--workers` | Parallel ENEX files (default: 1) |
+| `--exceptions-file` | Path to `exceptions.txt` for link resolution |
+| `--resume` | Resume a run with committed operations |
+| `--reset-run` | Reset one run ID back to pending |
+| `--wipe-local` | Delete local processing output for one run |
+| `--wipe-remote` | Archive Notion pages for one run and clear mappings |
+| `-v`, `--verbose` | Enable debug logging |
+
+---
+
+## Output Structure
+
+For `Enduring.enex`, extraction creates:
+
 ```
-
-With `Enduring.enex`, the output directory becomes:
-
-```text
-./processing/Enduring
-```
-
-The same destination tree will later hold extracted resources from the notes, such as files that need to be uploaded or manually inserted into Notion.
-
-`-w`, `--workers`
-
-Number of `.enex` files to process in parallel when `--enex-source` points at a
-directory. Use `1` for deterministic single-file-at-a-time processing.
-
-`--exceptions-file`
-
-Path to an `exceptions.txt` file used by `--resolve-evernote-links`.
-
-`-k`, `--notion-key`
-
-The Notion integration key. Required for Notion API modes, including
-`--notion-bootstrap`, `--notion-databases`, `--notion-import`, and
-`--wipe-remote`.
-
-`-n`, `--notion-root`
-
-The Notion parent page where `Evernote Import` and `Evernote Import Exceptions` will be managed. If omitted, the tool creates or reuses those pages as top-level workspace pages when the integration type allows it.
-
-`--resume`
-
-Continue processing a run that already has committed operations.
-
-`--reset-run`
-
-Run id to reset back to pending operations before import retry.
-
-`--wipe-local`
-
-Run id whose local processing directory should be removed.
-
-`--wipe-remote`
-
-Run id whose mapped Notion pages should be archived and removed from local
-mapping state.
-
-## Output files
-
-For `Enduring.enex`, the output structure is:
-
-```text
 processing/
   Enduring/
     notes/
       note_000001.enex
       note_000002.enex
+    resources/
+      screenshot.png
+      document.pdf
+      manifest.json
     state.db
     master.txt
     success.txt
     errors.txt
+    exceptions.txt
 ```
 
-`master.txt`
+| File | Purpose |
+|---|---|
+| `notes/` | Individual note XML files (one per note) |
+| `resources/` | Decoded binary attachments (images, PDFs, audio, files) |
+| `resources/manifest.json` | Hash → filepath mapping for the File Upload API |
+| `state.db` | SQLite database tracking run state, operations, and resume checkpoints |
+| `master.txt` | Full scope: note ID, title, path, tags, exception reasons |
+| `success.txt` | Successfully extracted notes |
+| `errors.txt` | Notes that failed extraction |
+| `exceptions.txt` | Notes with issues needing future attention |
 
-One line per extracted note. Each line contains the generated note id, note title, extracted note file path, comma-separated Evernote tags, and comma-separated exception reasons.
+---
 
-`success.txt`
+## Notion Structure Created
 
-One line per note that was successfully extracted.
+```
+[Your Root Page]/
+├── Evernote Import/
+│   ├── Notebook1 (database)
+│   │   ├── Note A (page with content blocks)
+│   │   └── Note B (page with content blocks)
+│   └── Notebook2 (database)
+│       └── ...
+└── Evernote Import Exceptions/
+    └── Import-Exceptions (database)
+        ├── Row: link exception (with URL to exact marker block)
+        ├── Row: encrypted content (with hint)
+        └── Row: unsupported content (with error details)
+```
 
-`errors.txt`
+**Import path and Exception path are always separate.** Exception rows link directly to the affected block in the imported page via block-level URLs.
 
-One line per note that failed extraction. An empty file means there were no extraction errors.
+---
 
-`exceptions.txt`
+## Content Mapping
 
-One line per successfully extracted note that already needs a future exception database row. Empty titles are normalized to `Empty Title` and recorded with the `Empty Title` reason. Notes with no content and no resources are recorded with the `No Content` reason. Embedded `evernote://` links are recorded with the `Evernote Link` reason, the visible link text, and the original link value. If multiple note-level reasons apply, all reasons are preserved.
+| Evernote | Notion |
+|---|---|
+| Headings (h1-h6) | heading_1, heading_2, heading_3 |
+| Bullet lists | bulleted_list_item |
+| Numbered lists | numbered_list_item |
+| Checkboxes | to_do (with checked state) |
+| Block quotes | quote |
+| Code / preformatted | code (plain text) |
+| Horizontal rules | divider |
+| Tables | table + table_row |
+| Images | image (via File Upload API) |
+| PDFs | pdf (via File Upload API) |
+| Audio | audio (via File Upload API) |
+| Other files | file (via File Upload API) |
+| Bold, italic, underline, strikethrough, inline code | Rich text annotations |
+| Hyperlinks | Rich text with link |
+| Evernote internal links | Warning callout + exception record |
+| Encrypted content | Warning callout + exception record |
 
-Later conversion may add `Unsupported Content` exception rows for notes that do
-contain data but include content that cannot be imported into supported Notion
-blocks. This is not treated as `No Content`.
+---
 
-Embedded links, resources, and documents may appear inside existing text. During
-conversion planning, the text is split above and below each non-text item so the
-non-text item can become its own Notion block. Large text blocks are split into
-smaller chunks before import to stay within Notion block-size limits.
+## Encrypted Content
 
-Future exception reporting will include links or durable references to extracted resources that could not be inserted automatically, so they can be manually placed into the correct imported Notion note.
+Evernote encrypted blocks (AES-128) are imported as warning markers. Use the Resolution Workbench to:
 
-`state.db`
+1. Enter your passphrase
+2. View the decrypted content in your browser (never stored)
+3. Choose: permanently decrypt in Notion, or delete the block entirely
 
-Durable local run state in SQLite. This file tracks extraction runs, note-level
-status, and resumable operation metadata for restart-safe imports and
-incremental testing.
+---
 
-## Count
+## Getting a Notion Integration Key
 
-Every converting run prints the number of notes read from the `.enex` file, the output directory, the number of successful extractions, and the number of extraction errors.
+1. Go to https://www.notion.so/my-integrations
+2. Click "New integration"
+3. Name it (e.g., "e2n migration")
+4. Copy the "Internal Integration Secret" (`ntn_...`)
+5. Share your target Notion page with the integration (page → ... → Connections → Add)
+
+---
+
+## Troubleshooting
+
+**"No .enex files found"** — Check that your path points to actual `.enex` exports from Evernote.
+
+**"API token is invalid"** — Verify your Notion key. Make sure the target page is shared with the integration.
+
+**Import seems stuck** — The tool respects Notion's rate limit (3 req/sec). Large notebooks take time. Check `/wizard/progress` for status.
+
+**Missing content in Notion** — Check the Resolution Workbench (`/resolve/`) for exceptions. Some content types require manual intervention.

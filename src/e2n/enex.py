@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 from dataclasses import dataclass
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,6 +18,9 @@ from e2n.state import ProcessingStateStore
 
 EMPTY_TITLE = "Empty Title"
 EVERNOTE_LINK_PATTERN = re.compile(r"^evernote:/*", re.IGNORECASE)
+EVERNOTE_WEB_LINK_PATTERN = re.compile(
+    r"^https?://(?:www\.)?evernote\.com/(?:shard/[^/]+/(?:nl|sh)/|l/)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,7 @@ def extract_enex_notes(enex_source: Path, processing_directory: Path) -> Extract
     success_count = 0
     error_count = 0
     note_exception_records: list[NoteExceptionRecord] = []
+    resource_manifest: dict[str, str] = {}
     state = ProcessingStateStore(paths.state_path)
     try:
         run_id = state.begin_run(source_path=source, output_directory=paths.output_directory)
@@ -89,6 +96,7 @@ def extract_enex_notes(enex_source: Path, processing_directory: Path) -> Extract
                 master_file.write(_note_record(note))
                 try:
                     _write_note_file(note_file, note_element)
+                    _extract_resources(note_element, paths.resources_directory, resource_manifest)
                     success_file.write(_note_record(note))
                     state.upsert_note(
                         run_id=run_id,
@@ -130,6 +138,10 @@ def extract_enex_notes(enex_source: Path, processing_directory: Path) -> Extract
                     error_count += 1
 
         _write_note_exception_records(paths.exceptions_path, note_exception_records)
+        if resource_manifest:
+            (paths.resources_directory / "manifest.json").write_text(
+                json.dumps(resource_manifest, indent=2), encoding="utf-8"
+            )
     finally:
         state.close()
 
@@ -302,6 +314,42 @@ def _write_note_file(path: Path, note_element: etree._Element) -> None:
     """Write a single note element as a standalone ENEX-shaped XML file."""
     note_xml = etree.tostring(note_element, encoding="utf-8")
     path.write_bytes(b'<?xml version="1.0" encoding="utf-8"?>\n<en-export>\n' + note_xml + b"\n</en-export>\n")
+
+
+def _extract_resources(
+    note_element: etree._Element, resources_dir: Path, manifest: dict[str, str]
+) -> None:
+    """Decode and write resource binaries to disk, updating the manifest."""
+    for child in note_element:
+        if _local_name(child.tag) != "resource":
+            continue
+        data_el = None
+        mime = ""
+        file_name = ""
+        for res_child in child:
+            tag = _local_name(res_child.tag)
+            if tag == "data":
+                data_el = res_child
+            elif tag == "mime":
+                mime = (res_child.text or "").strip()
+            elif tag == "resource-attributes":
+                for attr_child in res_child:
+                    if _local_name(attr_child.tag) == "file-name":
+                        file_name = (attr_child.text or "").strip()
+
+        if data_el is None or not data_el.text:
+            continue
+
+        raw = base64.b64decode(data_el.text)
+        md5_hash = hashlib.md5(raw).hexdigest()
+
+        if not file_name:
+            ext = mime.split("/")[-1] if "/" in mime else "bin"
+            file_name = f"{md5_hash}.{ext}"
+
+        dest = resources_dir / file_name
+        dest.write_bytes(raw)
+        manifest[md5_hash] = str(dest)
 
 
 def _note_record(note: ExtractedNote) -> str:

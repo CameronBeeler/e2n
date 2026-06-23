@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n Wizard - Import</title></head>
+<body>
+<h1>Step 4: Import to Notion</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<p>Notes extracted. Ready to import into Notion.</p>
+<form method="post" action="/wizard/step/4">
+  <button type="submit">Start Import</button>
+</form>
+</body>
+</html>

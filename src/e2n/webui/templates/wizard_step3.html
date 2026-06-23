@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n Wizard - Extract</title></head>
+<body>
+<h1>Step 3: Extract Notes</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<p>Ready to extract notes from your ENEX source.</p>
+<form method="post" action="/wizard/step/3">
+  <button type="submit">Start Extraction</button>
+</form>
+</body>
+</html>

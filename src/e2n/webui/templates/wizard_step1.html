@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n Wizard - Configure Source</title></head>
+<body>
+<h1>Step 1: Configure Source</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/wizard/step/1">
+  <label>ENEX Source (file or directory):</label>
+  <input type="text" name="enex_source" required>
+  <label>Processing Directory:</label>
+  <input type="text" name="processing_directory" required>
+  <button type="submit">Next</button>
+</form>
+</body>
+</html>

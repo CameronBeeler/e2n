@@ -614,3 +614,541 @@ def test_segments_to_notion_blocks_mixed_content_preserves_order() -> None:
     assert [b["type"] for b in blocks] == ["paragraph", "image", "paragraph", "callout"]
     assert len(exceptions) == 1  # only the evernote link
 
+
+
+
+# --- notion-import spec: block builders for new segment types ---
+
+
+def test_segments_to_notion_blocks_heading_produces_heading_block() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="heading", text="My Title", level=1)]
+    blocks, exceptions = segments_to_notion_blocks(segments, {})
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "heading_1"
+    assert blocks[0]["heading_1"]["rich_text"][0]["text"]["content"] == "My Title"
+
+
+def test_segments_to_notion_blocks_heading_level_2_and_3() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [
+        ContentSegment(kind="heading", text="H2", level=2),
+        ContentSegment(kind="heading", text="H3", level=3),
+    ]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "heading_2"
+    assert blocks[1]["type"] == "heading_3"
+
+
+def test_segments_to_notion_blocks_bulleted_list() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [
+        ContentSegment(kind="bulleted_list", text="Item A"),
+        ContentSegment(kind="bulleted_list", text="Item B"),
+    ]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert len(blocks) == 2
+    assert blocks[0]["type"] == "bulleted_list_item"
+    assert blocks[0]["bulleted_list_item"]["rich_text"][0]["text"]["content"] == "Item A"
+
+
+def test_segments_to_notion_blocks_numbered_list() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="numbered_list", text="Step 1")]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "numbered_list_item"
+
+
+def test_segments_to_notion_blocks_quote() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="quote", text="Famous words")]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "quote"
+    assert blocks[0]["quote"]["rich_text"][0]["text"]["content"] == "Famous words"
+
+
+def test_segments_to_notion_blocks_code() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="code", text="print('hello')")]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "code"
+    assert blocks[0]["code"]["rich_text"][0]["text"]["content"] == "print('hello')"
+    assert blocks[0]["code"]["language"] == "plain text"
+
+
+def test_segments_to_notion_blocks_divider() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="divider", text="")]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "divider"
+
+
+def test_segments_to_notion_blocks_to_do() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [
+        ContentSegment(kind="to_do", text="Buy milk", checked=False),
+        ContentSegment(kind="to_do", text="Done task", checked=True),
+    ]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "to_do"
+    assert blocks[0]["to_do"]["rich_text"][0]["text"]["content"] == "Buy milk"
+    assert blocks[0]["to_do"]["checked"] is False
+    assert blocks[1]["to_do"]["checked"] is True
+
+
+def test_segments_to_notion_blocks_table_with_rows() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="table", text="table", rows=[["A", "B"], ["1", "2"]])]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "table"
+    assert blocks[0]["table"]["table_width"] == 2
+    assert blocks[0]["table"]["has_column_header"] is True
+    children = blocks[0]["table"]["children"]
+    assert len(children) == 2
+    assert children[0]["table_row"]["cells"][0][0]["text"]["content"] == "A"
+
+
+def test_segments_to_notion_blocks_annotated_text() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="text", text="bold text", annotations={"bold": True})]
+    blocks, _ = segments_to_notion_blocks(segments, {})
+    rt = blocks[0]["paragraph"]["rich_text"][0]
+    assert rt["text"]["content"] == "bold text"
+    assert rt["annotations"]["bold"] is True
+
+
+def test_segments_to_notion_blocks_encrypted_produces_callout() -> None:
+    from e2n.enml import ContentSegment
+    from e2n.notion import segments_to_notion_blocks
+
+    segments = [ContentSegment(kind="encrypted", text="en-crypt", value="birthday hint")]
+    blocks, exceptions = segments_to_notion_blocks(segments, {})
+    assert blocks[0]["type"] == "callout"
+    assert "encrypted" in blocks[0]["callout"]["rich_text"][0]["text"]["content"].lower()
+    assert len(exceptions) == 1
+
+
+
+# --- notion-import spec: File Upload, Batch Append, Full Note Import ---
+
+
+def test_notion_client_upload_file_returns_upload_id(monkeypatch) -> None:
+    """File upload should create upload object, send file, return usable ID."""
+    from unittest.mock import MagicMock, patch
+    from pathlib import Path
+    from e2n.notion import NotionClient
+    import tempfile
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+
+    # Simulate: POST /file_uploads → {id: "upload-123", status: "pending"}
+    # POST /file_uploads/upload-123/send → {id: "upload-123", status: "uploaded"}
+    mock_api.request.side_effect = [
+        {"id": "upload-123", "status": "pending"},
+        {"id": "upload-123", "status": "uploaded"},
+    ]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(b"\x89PNG fake data")
+        tmp_path = Path(f.name)
+
+    try:
+        upload_id = client.upload_file(tmp_path)
+        assert upload_id == "upload-123"
+        assert mock_api.request.call_count == 2
+    finally:
+        tmp_path.unlink()
+
+
+def test_batch_append_splits_at_100_blocks() -> None:
+    """Blocks exceeding 100 should be split into multiple API calls."""
+    from unittest.mock import MagicMock, call
+    from e2n.notion import NotionClient, plain_text_span, paragraph_block
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.blocks.children.append.return_value = {"results": []}
+
+    blocks = [paragraph_block([plain_text_span(f"Block {i}")]) for i in range(250)]
+
+    client.append_blocks_batched("page-abc", blocks)
+
+    # Should be 3 calls: 100 + 100 + 50
+    assert mock_api.blocks.children.append.call_count == 3
+    calls = mock_api.blocks.children.append.call_args_list
+    assert len(calls[0][1]["children"]) == 100
+    assert len(calls[1][1]["children"]) == 100
+    assert len(calls[2][1]["children"]) == 50
+
+
+def test_import_note_creates_page_with_initial_blocks() -> None:
+    """First 100 blocks should be included in pages.create (1 API call not 2)."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, plain_text_span, paragraph_block
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.pages.create.return_value = {"id": "new-page-id", "url": "https://notion.so/page"}
+    mock_api.blocks.children.append.return_value = {"results": []}
+
+    blocks = [paragraph_block([plain_text_span(f"Block {i}")]) for i in range(150)]
+
+    page_id = client.import_note_blocks(
+        database_id="db-123",
+        title="Test Note",
+        tags=("tag1",),
+        blocks=blocks,
+    )
+
+    assert page_id == "new-page-id"
+    # Page creation should include first 100 blocks
+    create_call = mock_api.pages.create.call_args
+    assert len(create_call[1]["children"]) == 100
+    # Remaining 50 appended separately
+    assert mock_api.blocks.children.append.call_count == 1
+    append_call = mock_api.blocks.children.append.call_args
+    assert len(append_call[1]["children"]) == 50
+
+
+def test_import_note_with_no_overflow_uses_single_call() -> None:
+    """Notes with ≤100 blocks should create page+blocks in one API call, no append."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, plain_text_span, paragraph_block
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.pages.create.return_value = {"id": "page-xyz", "url": "https://notion.so/p"}
+
+    blocks = [paragraph_block([plain_text_span(f"B{i}")]) for i in range(50)]
+
+    page_id = client.import_note_blocks(
+        database_id="db-456",
+        title="Small Note",
+        tags=(),
+        blocks=blocks,
+    )
+
+    assert page_id == "page-xyz"
+    assert len(mock_api.pages.create.call_args[1]["children"]) == 50
+    # No overflow append needed
+    mock_api.blocks.children.append.assert_not_called()
+
+
+
+# --- notion-import spec: Full note import orchestration with checkpointing ---
+
+
+def test_execute_notion_operation_import_note_parses_and_creates_blocks(tmp_path) -> None:
+    """import_note operation should parse the note file, build blocks, and call import_note_blocks."""
+    from unittest.mock import MagicMock, patch
+    from pathlib import Path
+    from e2n.notion import NotionClient
+    from e2n.state import OperationRecord
+    from e2n.cli import _execute_notion_operation
+    import json
+
+    # Create a minimal extracted note file
+    note_file = tmp_path / "note_000001.enex"
+    note_file.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<en-export>\n'
+        "<note><title>Test</title>"
+        "<content><![CDATA[<?xml version=\"1.0\"?><en-note><p>Hello world</p></en-note>]]></content>"
+        "</note>\n</en-export>\n",
+        encoding="utf-8",
+    )
+
+    # Create a resource manifest (empty for this test)
+    resources_dir = tmp_path / "resources"
+    resources_dir.mkdir()
+    (resources_dir / "manifest.json").write_text("{}", encoding="utf-8")
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.pages.create.return_value = {"id": "created-page-id", "url": "https://notion.so/p"}
+
+    operation = OperationRecord(
+        operation_id=1,
+        run_id="run-1",
+        note_id="note_000001",
+        operation_type="import_note",
+        payload_json=json.dumps({
+            "database_id": "db-123",
+            "title": "Test",
+            "tags": ["tag1"],
+            "note_file": str(note_file),
+            "resources_directory": str(resources_dir),
+        }),
+        idempotency_key="note_000001:import_note:abc",
+        status="pending",
+        attempt_count=0,
+        next_retry_at=None,
+    )
+
+    result = _execute_notion_operation(client, operation)
+    assert result == "created-page-id"
+    # Verify pages.create was called with children (blocks from the parsed content)
+    create_kwargs = mock_api.pages.create.call_args[1]
+    assert "children" in create_kwargs
+    assert len(create_kwargs["children"]) >= 1
+
+
+def test_execute_notion_operation_import_note_uses_resource_manifest(tmp_path) -> None:
+    """import_note should resolve resource hashes via manifest and include them as blocks."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient
+    from e2n.state import OperationRecord
+    from e2n.cli import _execute_notion_operation
+    import json, hashlib, base64
+
+    # Create a note with an en-media reference
+    img_data = b"fake-image-bytes"
+    img_hash = hashlib.md5(img_data).hexdigest()
+
+    note_file = tmp_path / "note_000001.enex"
+    note_file.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<en-export>\n'
+        f'<note><title>With Image</title>'
+        f'<content><![CDATA[<?xml version="1.0"?><en-note>'
+        f'<en-media hash="{img_hash}" type="image/png"/>'
+        f'</en-note>]]></content></note>\n</en-export>\n',
+        encoding="utf-8",
+    )
+
+    resources_dir = tmp_path / "resources"
+    resources_dir.mkdir()
+    img_file = resources_dir / "photo.png"
+    img_file.write_bytes(img_data)
+    manifest = {img_hash: str(img_file)}
+    (resources_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    # upload_file mock
+    mock_api.request.side_effect = [
+        {"id": "upload-img-1", "status": "pending"},
+        {"id": "upload-img-1", "status": "uploaded"},
+    ]
+    mock_api.pages.create.return_value = {"id": "page-with-img", "url": "https://notion.so/p"}
+
+    operation = OperationRecord(
+        operation_id=2,
+        run_id="run-1",
+        note_id="note_000001",
+        operation_type="import_note",
+        payload_json=json.dumps({
+            "database_id": "db-456",
+            "title": "With Image",
+            "tags": [],
+            "note_file": str(note_file),
+            "resources_directory": str(resources_dir),
+        }),
+        idempotency_key="note_000001:import_note:xyz",
+        status="pending",
+        attempt_count=0,
+        next_retry_at=None,
+    )
+
+    result = _execute_notion_operation(client, operation)
+    assert result == "page-with-img"
+    # Should have uploaded the file
+    assert mock_api.request.call_count == 2
+
+
+
+# --- exception-tracking spec: Runtime exception row creation + marker block_id capture ---
+
+
+def test_create_exception_row_in_notion(monkeypatch) -> None:
+    """Exception rows should be created in the Import-Exceptions database, not under import pages."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, create_exception_row
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.pages.create.return_value = {"id": "exc-row-id", "url": "https://notion.so/exc"}
+
+    row_id = create_exception_row(
+        client,
+        exception_database_id="exc-db-123",
+        note_name="My Note",
+        reasons=("Evernote Link",),
+        error_message="Link requires manual resolution",
+        source_file="Enduring.enex",
+        link_text="Original Note",
+        link_value="evernote:///view/123/s1/guid/guid/",
+        page_url="https://notion.so/imported-page",
+    )
+
+    assert row_id == "exc-row-id"
+    create_kwargs = mock_api.pages.create.call_args[1]
+    # Must target the exception database, NOT an import database
+    assert create_kwargs["parent"]["database_id"] == "exc-db-123"
+    # Must have Reason multi-select
+    props = create_kwargs["properties"]
+    assert "Reason" in props
+
+
+def test_import_note_captures_marker_block_ids() -> None:
+    """When marker blocks are appended, their block_ids should be returned for state.db storage."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, segments_to_notion_blocks
+    from e2n.enml import ContentSegment
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+
+    # Simulate pages.create returning the page with block children that include a callout
+    mock_api.pages.create.return_value = {"id": "page-1", "url": "https://notion.so/p"}
+    # blocks.children.list returns the appended blocks with their IDs
+    mock_api.blocks.children.list.return_value = {
+        "results": [
+            {"id": "block-para-1", "type": "paragraph"},
+            {"id": "block-callout-1", "type": "callout"},
+        ],
+        "has_more": False,
+    }
+
+    segments = [
+        ContentSegment(kind="text", text="Hello"),
+        ContentSegment(kind="evernote_link", text="Other Note", value="evernote:///view/1/s/g/g/"),
+    ]
+    blocks, exceptions = segments_to_notion_blocks(segments, {}, note_id="n1", note_title="Test")
+
+    # The callout block is the marker — we need its block_id after creation
+    assert len(exceptions) == 1
+    # After import, caller should be able to list children and find callout block_ids
+    children = client.list_block_children("page-1")
+    callout_ids = [b["id"] for b in children if b["type"] == "callout"]
+    assert callout_ids == ["block-callout-1"]
+
+
+def test_delete_block_removes_marker() -> None:
+    """NotionClient.delete_block should call DELETE on the Notion API."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.blocks.delete.return_value = {"id": "block-123", "archived": True}
+
+    client.delete_block("block-123")
+
+    mock_api.blocks.delete.assert_called_once_with(block_id="block-123")
+
+
+def test_delete_block_handles_already_deleted() -> None:
+    """If a marker block was already deleted (404), delete_block should not raise."""
+    from unittest.mock import MagicMock
+    from e2n.notion import NotionClient, NotionAPIError
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    mock_api.blocks.delete.side_effect = Exception("Could not find block")
+
+    # Should not raise — graceful handling of already-deleted blocks
+    client.delete_block("block-gone")
+
+
+
+# --- exception-tracking: Wire exception row creation into import pipeline ---
+
+
+def test_execute_import_note_creates_exception_rows_for_evernote_links(tmp_path) -> None:
+    """When a note has evernote links, exception row Link should point to the BLOCK, not the page."""
+    from unittest.mock import MagicMock, call
+    from e2n.notion import NotionClient
+    from e2n.state import OperationRecord
+    from e2n.cli import _execute_notion_operation
+    import json
+
+    note_file = tmp_path / "note_000001.enex"
+    note_file.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<en-export>\n'
+        '<note><title>Link Note</title>'
+        '<content><![CDATA[<?xml version="1.0"?><en-note>'
+        '<p>Before the link</p>'
+        '<a href="evernote:///view/1/s/g/g/">Other Note</a>'
+        '</en-note>]]></content></note>\n</en-export>\n',
+        encoding="utf-8",
+    )
+    resources_dir = tmp_path / "resources"
+    resources_dir.mkdir()
+    (resources_dir / "manifest.json").write_text("{}", encoding="utf-8")
+
+    client = NotionClient.__new__(NotionClient)
+    mock_api = MagicMock()
+    client._sdk_client = mock_api
+    # pages.create for note page, then pages.create for exception row
+    mock_api.pages.create.side_effect = [
+        {"id": "note-page-id", "url": "https://notion.so/note"},
+        {"id": "exc-row-id", "url": "https://notion.so/exc"},
+    ]
+    # list_block_children returns the appended blocks with their IDs
+    mock_api.blocks.children.list.return_value = {
+        "results": [
+            {"id": "blk-para-1", "type": "paragraph"},
+            {"id": "blk-callout-1", "type": "callout"},
+        ],
+        "has_more": False,
+    }
+
+    operation = OperationRecord(
+        operation_id=10,
+        run_id="run-1",
+        note_id="note_000001",
+        operation_type="import_note",
+        payload_json=json.dumps({
+            "database_id": "db-import",
+            "title": "Link Note",
+            "tags": [],
+            "note_file": str(note_file),
+            "resources_directory": str(resources_dir),
+            "exception_database_id": "exc-db-999",
+        }),
+        idempotency_key="note_000001:import_note:h1",
+        status="pending",
+        attempt_count=0,
+        next_retry_at=None,
+    )
+
+    result = _execute_notion_operation(client, operation)
+    assert result == "note-page-id"
+    # Exception row should exist
+    assert mock_api.pages.create.call_count == 2
+    exc_kwargs = mock_api.pages.create.call_args_list[1][1]
+    # Link must point to the BLOCK, not just the page
+    link_url = exc_kwargs["properties"]["Link"]["url"]
+    assert "blk-callout-1".replace("-", "") in link_url.replace("-", "") or "blk" in link_url, (
+        f"Expected block-level URL, got: {link_url}"
+    )

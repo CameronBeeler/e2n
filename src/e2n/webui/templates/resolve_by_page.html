@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n - Resolve: {{ note_id }}</title></head>
+<body>
+<h1>Exceptions for {{ note_id }}</h1>
+<p>{{ exceptions | length }} exception(s)</p>
+<table>
+  <thead><tr><th>Reasons</th><th>Title</th><th>Link Text</th></tr></thead>
+  <tbody>
+  {% for exc in exceptions %}
+    <tr>
+      <td>{{ exc.reasons }}</td>
+      <td>{{ exc.title }}</td>
+      <td>{{ exc.link_text }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p><a href="/resolve/">← Back to dashboard</a></p>
+</body>
+</html>

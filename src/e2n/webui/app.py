@@ -13,6 +13,12 @@ from fastapi.templating import Jinja2Templates
 
 from e2n.cli import run_notion_import
 from e2n.enex import extract_enex_notes
+from e2n.notion import (
+    NotionClient,
+    bootstrap_notion_pages,
+    ensure_import_database,
+    ensure_exception_database,
+)
 from e2n.state import ProcessingStateStore
 
 
@@ -124,6 +130,479 @@ def create_app() -> FastAPI:
             return _redirect_with_message(processing_dir, f"Run control completed: {action}")
         except Exception as exc:
             return _redirect_with_error(processing_dir, str(exc))
+
+    # --- Wizard routes ---
+
+    # In-memory wizard state (per-process; sufficient for single-user local tool)
+    _wizard_state: dict[str, str] = {}
+
+    @app.get("/wizard/", response_class=HTMLResponse)
+    def wizard_root(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step1.html",
+            context={"error": ""},
+        )
+
+    @app.post("/wizard/step/1")
+    def wizard_step_1_post(
+        request: Request,
+        enex_source: str = Form(...),
+        processing_directory: str = Form(...),
+    ):
+        source_path = Path(enex_source).expanduser().resolve()
+        if not source_path.exists():
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step1.html",
+                context={"error": f"Source does not exist: {source_path}"},
+            )
+        _wizard_state["enex_source"] = str(source_path)
+        _wizard_state["processing_directory"] = processing_directory
+        _wizard_state["step1_complete"] = "true"
+        return RedirectResponse(url="/wizard/step/2", status_code=303)
+
+    @app.get("/wizard/step/2", response_class=HTMLResponse)
+    def wizard_step_2(request: Request):
+        if _wizard_state.get("step1_complete") != "true":
+            return RedirectResponse(url="/wizard/", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step2.html",
+            context={"error": "", "success": ""},
+        )
+
+    @app.post("/wizard/step/2", response_class=HTMLResponse)
+    def wizard_step_2_post(
+        request: Request,
+        notion_key: str = Form(...),
+        notion_root: str = Form(""),
+    ):
+        try:
+            client = NotionClient(notion_key)
+            client.search_pages()
+            _wizard_state["notion_key"] = notion_key
+            _wizard_state["notion_root"] = notion_root
+            _wizard_state["step2_complete"] = "true"
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": "", "success": "Connected successfully."},
+            )
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": f"Connection failed: {exc}", "success": ""},
+            )
+
+    @app.get("/wizard/step/3", response_class=HTMLResponse)
+    def wizard_step_3(request: Request):
+        if _wizard_state.get("step2_complete") != "true":
+            return RedirectResponse(url="/wizard/step/2", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step3.html",
+            context={"error": ""},
+        )
+
+    @app.post("/wizard/step/3")
+    def wizard_step_3_post(request: Request):
+        if _wizard_state.get("step2_complete") != "true":
+            return RedirectResponse(url="/wizard/step/2", status_code=303)
+        try:
+            source = Path(_wizard_state["enex_source"])
+            proc_dir = Path(_wizard_state["processing_directory"])
+            extract_enex_notes(source, proc_dir)
+            _wizard_state["step3_complete"] = "true"
+            return RedirectResponse(url="/wizard/step/4", status_code=303)
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step3.html",
+                context={"error": str(exc)},
+            )
+
+    @app.get("/wizard/step/4", response_class=HTMLResponse)
+    def wizard_step_4(request: Request):
+        if _wizard_state.get("step3_complete") != "true":
+            return RedirectResponse(url="/wizard/step/3", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step4.html",
+            context={"error": ""},
+        )
+
+    @app.post("/wizard/step/4")
+    def wizard_step_4_post(request: Request):
+        if _wizard_state.get("step3_complete") != "true":
+            return RedirectResponse(url="/wizard/step/3", status_code=303)
+        try:
+            source = Path(_wizard_state["enex_source"])
+            proc_dir = Path(_wizard_state["processing_directory"])
+            notion_key = _wizard_state.get("notion_key", "")
+            notion_root = _wizard_state.get("notion_root") or None
+
+            from e2n.enex import discover_enex_sources
+            from e2n.enml import plan_enml_segments
+            from e2n.notion import segments_to_notion_blocks
+
+            client = NotionClient(notion_key)
+            bootstrap = bootstrap_notion_pages(notion_key, root_title=notion_root)
+            sources = discover_enex_sources(source)
+
+            for src in sources:
+                output_dir = proc_dir.expanduser().resolve() / src.stem
+                state_path = output_dir / "state.db"
+                if not state_path.exists():
+                    continue
+                import_db = ensure_import_database(client, bootstrap.converted.page_id, src.stem)
+                exc_db = ensure_exception_database(client, bootstrap.exceptions.page_id)
+
+                store = ProcessingStateStore(state_path)
+                try:
+                    run_id = store.latest_run_id()
+                    if not run_id:
+                        continue
+                    notes = store.list_notes(run_id, status="extracted")
+                    for note in notes:
+                        note_file = output_dir / "notes" / f"{note.note_id}.enex"
+                        if not note_file.exists():
+                            continue
+                        from lxml import etree
+                        tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
+                        root = tree.getroot()
+                        note_el = root.find("note") if root.tag != "note" else root
+                        content_el = note_el.find("content") if note_el is not None else None
+                        content_text = content_el.text or "" if content_el is not None else ""
+
+                        segments = plan_enml_segments(content_text)
+                        blocks, _exc = segments_to_notion_blocks(
+                            segments, {}, note_id=note.note_id, note_title=note.title
+                        )
+                        client.import_note_blocks(
+                            database_id=import_db.database_id,
+                            title=note.title,
+                            tags=tuple(note.tags),
+                            blocks=blocks,
+                        )
+                finally:
+                    store.close()
+
+            _wizard_state["step4_complete"] = "true"
+            return RedirectResponse(url="/wizard/step/5", status_code=303)
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step4.html",
+                context={"error": str(exc)},
+            )
+
+    @app.get("/wizard/step/5", response_class=HTMLResponse)
+    def wizard_step_5(request: Request):
+        if _wizard_state.get("step4_complete") != "true" and _wizard_state.get("step3_complete") != "true":
+            return RedirectResponse(url="/wizard/step/4", status_code=303)
+        # Collect exception summary from processing directories
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        exceptions_summary: list[dict] = []
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                exc_file = child / "exceptions.txt" if child.is_dir() else None
+                if exc_file and exc_file.exists():
+                    lines = exc_file.read_text(encoding="utf-8").strip().splitlines()
+                    for line in lines:
+                        parts = line.split("\t")
+                        if len(parts) >= 3:
+                            exceptions_summary.append({
+                                "note_id": parts[0],
+                                "title": parts[1],
+                                "reasons": parts[2],
+                            })
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_step5.html",
+            context={"exceptions": exceptions_summary, "total": len(exceptions_summary)},
+        )
+
+    # --- Resolution Workbench routes ---
+
+    def _load_exceptions_from_processing() -> list[dict]:
+        """Load all exception records from processing directories."""
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        exceptions: list[dict] = []
+        if not proc_dir.exists():
+            return exceptions
+        for child in proc_dir.iterdir():
+            if not child.is_dir():
+                continue
+            exc_file = child / "exceptions.txt"
+            if not exc_file.exists():
+                continue
+            for line in exc_file.read_text(encoding="utf-8").strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    exceptions.append({
+                        "note_id": parts[0],
+                        "title": parts[1],
+                        "reasons": parts[2],
+                        "source": parts[3] if len(parts) > 3 else "",
+                        "block_url": parts[4] if len(parts) > 4 else "",
+                        "link_text": parts[5] if len(parts) > 5 else "",
+                        "link_value": parts[6] if len(parts) > 6 else "",
+                    })
+        return exceptions
+
+    @app.get("/resolve/", response_class=HTMLResponse)
+    def resolve_dashboard(request: Request):
+        exceptions = _load_exceptions_from_processing()
+        # Group by reason category
+        categories: dict[str, int] = {}
+        for exc in exceptions:
+            for reason in exc["reasons"].split(","):
+                reason = reason.strip()
+                if reason:
+                    categories[reason] = categories.get(reason, 0) + 1
+        # Group by note for "by page" view
+        pages: dict[str, int] = {}
+        for exc in exceptions:
+            pages[exc["note_id"]] = pages.get(exc["note_id"], 0) + 1
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_dashboard.html",
+            context={"categories": categories, "pages": pages, "total": len(exceptions)},
+        )
+
+    @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
+    def resolve_by_type(request: Request, reason_slug: str):
+        exceptions = _load_exceptions_from_processing()
+        # Map slug to reason (e.g., "evernote-link" → "Evernote Link")
+        reason_map = {
+            "evernote-link": "Evernote Link",
+            "empty-title": "Empty Title",
+            "no-content": "No Content",
+            "unsupported-content": "Unsupported Content",
+            "encrypted": "Encrypted",
+        }
+        target_reason = reason_map.get(reason_slug, reason_slug)
+        filtered = [e for e in exceptions if target_reason in e["reasons"]]
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_by_type.html",
+            context={"exceptions": filtered, "reason": target_reason},
+        )
+
+    @app.get("/resolve/page/{note_id}", response_class=HTMLResponse)
+    def resolve_by_page(request: Request, note_id: str):
+        exceptions = _load_exceptions_from_processing()
+        filtered = [e for e in exceptions if e["note_id"] == note_id]
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_by_page.html",
+            context={"exceptions": filtered, "note_id": note_id},
+        )
+
+    @app.post("/resolve/auto-relink", response_class=HTMLResponse)
+    def resolve_auto_relink(request: Request):
+        # Warn (not block) if imports not complete
+        warning = ""
+        if _wizard_state.get("step4_complete") != "true":
+            warning = "Not all imports are complete. Some links may not resolve until all sources are imported."
+
+        exceptions = _load_exceptions_from_processing()
+        link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
+
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_auto_relink_result.html",
+                context={"error": "No Notion key configured.", "warning": "",
+                         "resolved": 0, "skipped": 0, "results": []},
+            )
+
+        client = NotionClient(notion_key)
+        resolved = 0
+        skipped = 0
+        results: list[dict] = []
+
+        for exc in link_exceptions:
+            link_text = exc.get("link_text", "").strip()
+            if not link_text:
+                skipped += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no link text"})
+                continue
+
+            matches = [p for p in client.search_pages(link_text) if p.title == link_text]
+
+            if len(matches) == 1:
+                resolved += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {matches[0].title}"})
+            elif len(matches) == 0:
+                skipped += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no match found"})
+            else:
+                skipped += 1
+                results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": f"{len(matches)} matches — manual review required"})
+
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_auto_relink_result.html",
+            context={"error": "", "warning": warning, "resolved": resolved, "skipped": skipped, "results": results},
+        )
+
+    # --- Individual resolution actions ---
+
+    @app.post("/resolve/acknowledge/{note_id}")
+    def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form("")):
+        notion_key = _wizard_state.get("notion_key", "")
+        if notion_key and block_id:
+            client = NotionClient(notion_key)
+            client.delete_block(block_id)
+        return RedirectResponse(url="/resolve/", status_code=303)
+
+    @app.post("/resolve/delete-block")
+    def resolve_delete_block(request: Request, block_id: str = Form(...), note_id: str = Form("")):
+        notion_key = _wizard_state.get("notion_key", "")
+        if notion_key:
+            client = NotionClient(notion_key)
+            client.delete_block(block_id)
+        return RedirectResponse(url="/resolve/", status_code=303)
+
+    @app.get("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
+    def resolve_decrypt_view(request: Request, note_id: str):
+        exceptions = _load_exceptions_from_processing()
+        note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+        hint = ""
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    hint = crypt_el.attrib.get("hint", "")
+                                    break
+                        except Exception:
+                            pass
+                    break
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_decrypt.html",
+            context={"note_id": note_id, "hint": hint, "exceptions": note_exceptions},
+        )
+
+    @app.post("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
+    def resolve_decrypt_post(request: Request, note_id: str, passphrase: str = Form(...)):
+        import re as _re
+        import base64 as _b64
+        import hashlib as _hashlib
+
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        encrypted_b64 = ""
+        hint = ""
+        cipher_name = "AES"
+        key_length = 128
+
+        # Find the encrypted content in the note file
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    # Parse the ENML content to find en-crypt
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    hint = crypt_el.attrib.get("hint", "")
+                                    cipher_name = crypt_el.attrib.get("cipher", "AES")
+                                    length_str = crypt_el.attrib.get("length", "128")
+                                    key_length = int(length_str) if length_str.isdigit() else 128
+                                    encrypted_b64 = (crypt_el.text or "").strip()
+                                    break
+                        except Exception:
+                            pass
+                    break
+
+        if not encrypted_b64:
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_decrypt_result.html",
+                context={"note_id": note_id, "hint": hint, "error": "No encrypted content found.", "decrypted": ""},
+            )
+
+        # Attempt decryption
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives import padding
+
+            raw = _b64.b64decode(encrypted_b64)
+            key = _hashlib.md5(passphrase.encode("utf-8")).digest()[:key_length // 8]
+            iv = raw[:16]
+            ciphertext = raw[16:]
+
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            padded = decryptor.update(ciphertext) + decryptor.finalize()
+
+            unpadder = padding.PKCS7(128).unpadder()
+            decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
+            decrypted_text = decrypted_bytes.decode("utf-8")
+
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_decrypt_result.html",
+                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text},
+            )
+        except Exception:
+            return templates.TemplateResponse(
+                request=request,
+                name="resolve_decrypt_result.html",
+                context={"note_id": note_id, "hint": hint, "error": "Decryption failed — wrong passphrase or corrupted data.", "decrypted": ""},
+            )
+
+    @app.get("/wizard/progress")
+    def wizard_progress():
+        proc_dir = _wizard_state.get("processing_directory", "")
+        if not proc_dir:
+            return {"status": "not_started", "total_notes": 0, "processed": 0, "current": ""}
+        proc_path = Path(proc_dir).expanduser().resolve()
+        # Scan for state.db files in processing subdirectories
+        total = 0
+        processed = 0
+        for child in proc_path.iterdir() if proc_path.exists() else []:
+            state_path = child / "state.db" if child.is_dir() else None
+            if state_path and state_path.exists():
+                store = ProcessingStateStore(state_path)
+                try:
+                    run_id = store.latest_run_id()
+                    if run_id:
+                        counts = store.count_operations_by_status(run_id)
+                        total += counts.get("pending", 0) + counts.get("committed", 0) + counts.get("failed", 0)
+                        processed += counts.get("committed", 0)
+                finally:
+                    store.close()
+        status = "complete" if total > 0 and processed == total else "in_progress" if processed > 0 else "not_started"
+        return {"status": status, "total_notes": total, "processed": processed, "current": ""}
 
     return app
 
