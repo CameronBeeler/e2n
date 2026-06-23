@@ -4,12 +4,13 @@
 <body>
 <h1>Step 1: Configure Source</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
-<form method="post" action="/wizard/step/1">
+<form method="post" action="/wizard/step/1" onsubmit="disableBtn(this)">
   <label>ENEX Source (file or directory):</label>
   <input type="text" name="enex_source" required>
   <label>Processing Directory:</label>
   <input type="text" name="processing_directory" required>
-  <button type="submit">Next</button>
+  <button type="submit">Next →</button>
 </form>
+<script>function disableBtn(f){var b=f.querySelector('button');b.disabled=true;b.textContent='Processing...';}</script>
 </body>
 </html>

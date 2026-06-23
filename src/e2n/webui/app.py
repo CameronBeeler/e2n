@@ -21,6 +21,11 @@ from e2n.notion import (
 )
 from e2n.state import ProcessingStateStore
 
+try:
+    from notion_client import Client as _NotionSDKClient
+except ImportError:
+    _NotionSDKClient = None  # type: ignore[assignment, misc]
+
 
 @dataclass(frozen=True)
 class RunCard:
@@ -170,18 +175,36 @@ def create_app() -> FastAPI:
         notion_key: str = Form(...),
         notion_root: str = Form(""),
     ):
-        try:
-            client = NotionClient(notion_key)
-            client.search_pages()
-            _wizard_state["notion_key"] = notion_key
-            _wizard_state["notion_root"] = notion_root
-            _wizard_state["step2_complete"] = "true"
-            return RedirectResponse(url="/wizard/step/3", status_code=303)
-        except Exception as exc:
+        if not notion_key.strip():
             return templates.TemplateResponse(
                 request=request,
                 name="wizard_step2.html",
-                context={"error": f"Connection failed: {exc}", "success": ""},
+                context={"error": "Notion key is required.", "success": ""},
+            )
+        if not notion_root.strip():
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": "Notion root page is required.", "success": ""},
+            )
+        try:
+            # Quick validation: lightweight API call with 10s timeout
+            client = NotionClient(notion_key.strip())
+            client.search_pages(notion_root.strip())
+            _wizard_state["notion_key"] = notion_key.strip()
+            _wizard_state["notion_root"] = notion_root.strip()
+            _wizard_state["step2_complete"] = "true"
+            return RedirectResponse(url="/wizard/step/3", status_code=303)
+        except Exception as exc:
+            error_msg = str(exc)
+            if "unauthorized" in error_msg.lower() or "invalid" in error_msg.lower():
+                error_msg = "Invalid API key. Check your integration secret at notion.so/my-integrations."
+            elif "timeout" in error_msg.lower() or "connect" in error_msg.lower():
+                error_msg = "Connection timed out. Check your internet connection."
+            return templates.TemplateResponse(
+                request=request,
+                name="wizard_step2.html",
+                context={"error": f"Connection failed: {error_msg}", "success": ""},
             )
 
     @app.get("/wizard/step/3", response_class=HTMLResponse)
@@ -234,28 +257,38 @@ def create_app() -> FastAPI:
             from e2n.enex import discover_enex_sources
             from e2n.enml import plan_enml_segments
             from e2n.notion import segments_to_notion_blocks
+            import logging
+            log = logging.getLogger("e2n.webui.import")
 
             client = NotionClient(notion_key)
             bootstrap = bootstrap_notion_pages(notion_key, root_title=notion_root)
+            log.info("Bootstrap complete: converted=%s exceptions=%s", bootstrap.converted.page_id, bootstrap.exceptions.page_id)
             sources = discover_enex_sources(source)
+            log.info("Sources: %s", [s.name for s in sources])
 
+            imported_count = 0
             for src in sources:
                 output_dir = proc_dir.expanduser().resolve() / src.stem
                 state_path = output_dir / "state.db"
                 if not state_path.exists():
+                    log.warning("No state.db for source %s at %s — skipping", src.name, state_path)
                     continue
                 import_db = ensure_import_database(client, bootstrap.converted.page_id, src.stem)
+                log.info("Import DB: %s (%s)", import_db.title, import_db.database_id)
                 exc_db = ensure_exception_database(client, bootstrap.exceptions.page_id)
 
                 store = ProcessingStateStore(state_path)
                 try:
                     run_id = store.latest_run_id()
                     if not run_id:
+                        log.warning("No run_id in state.db for %s — skipping", src.name)
                         continue
                     notes = store.list_notes(run_id, status="extracted")
+                    log.info("Found %d extracted notes for run %s", len(notes), run_id)
                     for note in notes:
                         note_file = output_dir / "notes" / f"{note.note_id}.enex"
                         if not note_file.exists():
+                            log.warning("Note file missing: %s — skipping", note_file)
                             continue
                         from lxml import etree
                         tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
@@ -268,15 +301,18 @@ def create_app() -> FastAPI:
                         blocks, _exc = segments_to_notion_blocks(
                             segments, {}, note_id=note.note_id, note_title=note.title
                         )
-                        client.import_note_blocks(
+                        page_id = client.import_note_blocks(
                             database_id=import_db.database_id,
                             title=note.title,
                             tags=tuple(note.tags),
                             blocks=blocks,
                         )
+                        log.info("Imported note %s → page %s (%d blocks)", note.note_id, page_id, len(blocks))
+                        imported_count += 1
                 finally:
                     store.close()
 
+            log.info("Import complete: %d notes imported", imported_count)
             _wizard_state["step4_complete"] = "true"
             return RedirectResponse(url="/wizard/step/5", status_code=303)
         except Exception as exc:

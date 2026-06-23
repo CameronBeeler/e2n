@@ -69,6 +69,14 @@ if ! "$PYTHON" -m pip --version &>/dev/null; then
 fi
 ok "pip: available"
 
+# --- Notion check ---
+if ! command -v notion &>/dev/null && ! command -v ntn &>/dev/null; then
+    warn "Notion desktop app or CLI not detected (optional but recommended)"
+    echo "  The Notion desktop app is required to use your imported content."
+    echo "  Download: https://www.notion.so/desktop"
+    echo ""
+fi
+
 # --- Venv check ---
 if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/python" ]; then
     ok "Virtual environment: exists ($VENV_DIR)"

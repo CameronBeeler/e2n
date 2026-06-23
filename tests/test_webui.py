@@ -79,12 +79,10 @@ def test_wizard_step_2_shows_notion_config(client, tmp_path) -> None:
 
 def test_wizard_step_2_post_test_connection_success(client, tmp_path, monkeypatch) -> None:
     """POST /wizard/step/2 with valid key should advance to step 3."""
-    # Complete step 1 first
     source = tmp_path / "Test.enex"
     source.write_text("<en-export></en-export>", encoding="utf-8")
     client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(tmp_path / "proc")})
 
-    # Mock the Notion API connection test
     from unittest.mock import MagicMock, patch
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
@@ -92,7 +90,7 @@ def test_wizard_step_2_post_test_connection_success(client, tmp_path, monkeypatc
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
         response = client.post(
             "/wizard/step/2",
-            data={"notion_key": "ntn_test_key_123", "notion_root": ""},
+            data={"notion_key": "ntn_test_key_123", "notion_root": "My Root"},
             follow_redirects=False,
         )
 
@@ -110,7 +108,7 @@ def test_wizard_step_2_post_test_connection_failure(client, tmp_path, monkeypatc
     with patch("e2n.webui.app.NotionClient", side_effect=Exception("Invalid token")):
         response = client.post(
             "/wizard/step/2",
-            data={"notion_key": "bad_key", "notion_root": ""},
+            data={"notion_key": "bad_key", "notion_root": "Root"},
         )
 
     assert response.status_code == 200
@@ -160,7 +158,7 @@ def test_wizard_step_3_triggers_extraction(client, tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_test", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_test", "notion_root": "Root"})
 
     # Trigger extraction
     response = client.post("/wizard/step/3", follow_redirects=False)
@@ -201,7 +199,7 @@ def test_wizard_step_4_shows_import_page(client, tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_test", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_test", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     response = client.get("/wizard/step/4")
@@ -242,7 +240,7 @@ def test_wizard_step_4_post_triggers_import(client, tmp_path) -> None:
 
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
         client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
 
     client.post("/wizard/step/3")  # extract
 
@@ -283,7 +281,7 @@ def test_wizard_step_5_shows_exception_summary(client, tmp_path) -> None:
 
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
         client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
 
     client.post("/wizard/step/3")
 
@@ -318,7 +316,7 @@ def test_resolve_dashboard_shows_categories(client, tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     response = client.get("/resolve/")
@@ -343,7 +341,7 @@ def test_resolve_by_type_lists_exceptions(client, tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     response = client.get("/resolve/type/evernote-link")
@@ -368,7 +366,7 @@ def test_resolve_by_page_lists_exceptions_for_one_note(client, tmp_path) -> None
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     response = client.get("/resolve/page/note_000001")
@@ -396,7 +394,7 @@ def test_auto_relink_warns_if_imports_not_complete(client, tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
     # Step 4 NOT executed — imports not complete
 
@@ -441,7 +439,7 @@ def test_auto_relink_resolves_single_match_links(client, tmp_path) -> None:
 
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
         client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     with patch("e2n.webui.app.NotionClient", return_value=mock_client), \
@@ -492,7 +490,7 @@ def test_auto_relink_skips_multi_match_links(client, tmp_path) -> None:
 
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
         client.post("/wizard/step/1", data={"enex_source": str(source), "processing_directory": str(proc_dir)})
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
     with patch("e2n.webui.app.NotionClient", return_value=mock_client), \
          patch("e2n.webui.app.bootstrap_notion_pages", return_value=mock_bootstrap), \
@@ -528,7 +526,7 @@ def test_resolve_acknowledge_marks_resolved(client, tmp_path) -> None:
     mock_client.search_pages.return_value = []
     mock_client.delete_block.return_value = None
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
 
     client.post("/wizard/step/3")
 
@@ -559,7 +557,7 @@ def test_resolve_delete_block_removes_from_notion(client, tmp_path) -> None:
     mock_client.search_pages.return_value = []
     mock_client.delete_block.return_value = None
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
 
     client.post("/wizard/step/3")
 
@@ -589,7 +587,7 @@ def test_resolve_decrypt_view_requires_passphrase(client, tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     response = client.get("/resolve/decrypt/note_000001")
@@ -638,7 +636,7 @@ def test_resolve_decrypt_post_shows_decrypted_content(client, tmp_path) -> None:
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     response = client.post(
@@ -670,7 +668,7 @@ def test_resolve_decrypt_post_wrong_passphrase_shows_error(client, tmp_path) -> 
     mock_client = MagicMock()
     mock_client.search_pages.return_value = []
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     response = client.post(
@@ -723,7 +721,7 @@ def test_resolve_decrypt_and_import_replaces_block(client, tmp_path) -> None:
     mock_client._sdk_client.blocks.children.append.return_value = {"results": [{"id": "new-blk"}]}
 
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):
-        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": ""})
+        client.post("/wizard/step/2", data={"notion_key": "ntn_k", "notion_root": "Root"})
     client.post("/wizard/step/3")
 
     with patch("e2n.webui.app.NotionClient", return_value=mock_client):

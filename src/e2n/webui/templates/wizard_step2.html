@@ -5,7 +5,7 @@
 <h1>Step 2: Configure Notion Connection</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if success %}<p class="success">{{ success }}</p>{% endif %}
-<form method="post" action="/wizard/step/2">
+<form method="post" action="/wizard/step/2" onsubmit="disableBtn(this)">
   <label>Notion Integration Key:</label>
   <input type="password" name="notion_key" required>
   <label>Notion Root Page:</label>
@@ -13,5 +13,6 @@
   <p class="help">Enter the exact title of a Notion page you've shared with your integration. The import structure will be created under this page.</p>
   <button type="submit">Connect →</button>
 </form>
+<script>function disableBtn(f){var b=f.querySelector('button');b.disabled=true;b.textContent='Connecting...';}</script>
 </body>
 </html>
