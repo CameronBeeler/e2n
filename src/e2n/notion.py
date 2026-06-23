@@ -695,9 +695,24 @@ def ensure_child_database(
     database_title: str,
     properties: JsonObject,
 ) -> NotionDatabaseRef:
-    """Create a child database only when an exact existing sibling is absent."""
+    """Create a child database only when an exact existing sibling is absent.
+
+    If the database already exists, ensures all expected properties are present
+    (adds missing properties without modifying existing ones).
+    """
     existing = _find_child_database(client.search_databases(database_title), parent_page_id, database_title)
     if existing is not None:
+        # Ensure schema has all expected properties (add missing ones)
+        try:
+            props_to_add = {k: v for k, v in properties.items() if k != "Name"}
+            if props_to_add:
+                client._sdk_call(
+                    client._sdk_client.databases.update,
+                    database_id=existing.database_id,
+                    properties=props_to_add,
+                )
+        except Exception:
+            pass  # Best effort — database still usable even if schema update fails
         return existing
     return client.create_database(parent_page_id, database_title, properties)
 

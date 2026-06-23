@@ -70,9 +70,15 @@ fi
 ok "pip: available"
 
 # --- Notion check ---
-if ! command -v notion &>/dev/null && ! command -v ntn &>/dev/null; then
-    warn "Notion desktop app or CLI not detected (optional but recommended)"
-    echo "  The Notion desktop app is required to use your imported content."
+if command -v notion &>/dev/null; then
+    ok "Notion: desktop app detected"
+elif command -v ntn &>/dev/null; then
+    ok "Notion: CLI (ntn) detected"
+elif [ -d "/Applications/Notion.app" ] || [ -d "$HOME/Applications/Notion.app" ]; then
+    ok "Notion: desktop app detected"
+else
+    warn "Notion desktop app not detected"
+    echo "  The Notion app is required to use your imported content."
     echo "  Download: https://www.notion.so/desktop"
     echo ""
 fi
