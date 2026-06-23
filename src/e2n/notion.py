@@ -375,7 +375,7 @@ class NotionClient:
 
         while True:
             body: JsonObject = {
-                "filter": {"property": "object", "value": "database"},
+                "filter": {"property": "object", "value": "data_source"},
                 "page_size": 100,
             }
             if query:
