@@ -144,10 +144,13 @@ def create_app() -> FastAPI:
             return templates.TemplateResponse(
                 request=request,
                 name="wizard_step1.html",
-                context={"error": f"Source does not exist: {source_path}"},
+                context={"error": f"ENEX source does not exist: {source_path}"},
             )
+        # Processing directory will be created automatically during extraction — no need to validate existence
+        proc_path = Path(processing_directory).expanduser().resolve()
+        proc_path.mkdir(parents=True, exist_ok=True)
         _wizard_state["enex_source"] = str(source_path)
-        _wizard_state["processing_directory"] = processing_directory
+        _wizard_state["processing_directory"] = str(proc_path)
         _wizard_state["step1_complete"] = "true"
         return RedirectResponse(url="/wizard/step/2", status_code=303)
 

@@ -655,6 +655,8 @@ def bootstrap_notion_pages(
 
     shared_pages = notion.search_pages(root_title)
     root = _select_root_page(shared_pages, root_title)
+    if root is None:
+        root = notion.create_workspace_page(root_title)
     all_visible_pages = notion.search_pages()
 
     converted = _find_child_page(all_visible_pages, root.page_id, converted_title)
@@ -731,14 +733,14 @@ def create_exception_row(
     return response["id"]
 
 
-def _select_root_page(pages: list[NotionPageRef], root_title: str | None) -> NotionPageRef:
+def _select_root_page(pages: list[NotionPageRef], root_title: str | None) -> NotionPageRef | None:
+    """Find the shared page matching root_title, or return None if not found."""
     if root_title is not None:
         matches = [page for page in pages if page.title == root_title]
         if not matches:
-            raise ValueError(f"Could not find a shared Notion page titled {root_title!r}")
+            return None
         return _deepest_page(matches)
-
-    raise ValueError("root_title is required when selecting a parent page")
+    return None
 
 
 def _deepest_page(pages: list[NotionPageRef]) -> NotionPageRef:
