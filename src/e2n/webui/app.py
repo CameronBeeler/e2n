@@ -287,6 +287,14 @@ def create_app() -> FastAPI:
                         continue
                     notes = store.list_notes(run_id, status="extracted")
                     log.info("Found %d extracted notes for run %s", len(notes), run_id)
+
+                    # Load resource manifest for this source
+                    import json as _json
+                    manifest_path = output_dir / "resources" / "manifest.json"
+                    resource_manifest: dict[str, str] = {}
+                    if manifest_path.exists():
+                        resource_manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                    log.info("Resource manifest: %d entries", len(resource_manifest))
                     for note in notes:
                         note_file = output_dir / "notes" / f"{note.note_id}.enex"
                         if not note_file.exists():
@@ -301,8 +309,22 @@ def create_app() -> FastAPI:
                             content_text = content_el.text or "" if content_el is not None else ""
 
                             segments = plan_enml_segments(content_text)
+
+                            # Upload resources referenced by this note
+                            from pathlib import Path as _P
+                            note_resource_map: dict[str, str] = {}
+                            for seg in segments:
+                                if seg.kind == "resource" and seg.value and seg.value in resource_manifest:
+                                    local_path = _P(resource_manifest[seg.value])
+                                    if local_path.exists() and seg.value not in note_resource_map:
+                                        try:
+                                            upload_id = client.upload_file(local_path)
+                                            note_resource_map[seg.value] = f"upload:{upload_id}"
+                                        except Exception as upload_err:
+                                            log.warning("Upload failed for %s: %s", local_path.name, upload_err)
+
                             blocks, exceptions = segments_to_notion_blocks(
-                                segments, {}, note_id=note.note_id, note_title=note.title
+                                segments, note_resource_map, note_id=note.note_id, note_title=note.title
                             )
                             page_id = client.import_note_blocks(
                                 database_id=import_db.database_id,
@@ -315,6 +337,17 @@ def create_app() -> FastAPI:
                         except Exception as note_err:
                             log.error("Failed to import note %s (%s): %s", note.note_id, note.title, note_err)
                             continue
+
+                        # Append import-time exceptions to exceptions.txt for unified tracking
+                        if exceptions:
+                            exc_file = output_dir / "exceptions.txt"
+                            with exc_file.open("a", encoding="utf-8") as ef:
+                                for exc in exceptions:
+                                    reasons = ",".join(str(r) for r in (exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)))
+                                    error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
+                                    link_text = getattr(exc, "link_text", "")
+                                    link_value = getattr(exc, "link_value", "")
+                                    ef.write(f"{note.note_id}\t{note.title}\t{reasons}\t{src.name}\t\t{link_text}\t{link_value}\t{error_msg}\n")
 
                         # Create exception rows for any issues found
                         if exceptions:
@@ -414,6 +447,7 @@ def create_app() -> FastAPI:
                         "block_url": parts[4] if len(parts) > 4 else "",
                         "link_text": parts[5] if len(parts) > 5 else "",
                         "link_value": parts[6] if len(parts) > 6 else "",
+                        "error_message": parts[7] if len(parts) > 7 else "",
                     })
         return exceptions
 
@@ -500,8 +534,66 @@ def create_app() -> FastAPI:
             matches = [p for p in client.search_pages(link_text) if p.title == link_text]
 
             if len(matches) == 1:
-                resolved += 1
-                results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {matches[0].title}"})
+                # Found exact match — attempt full resolution
+                target_page = matches[0]
+                resolution_success = False
+                resolved_block_url = ""
+
+                # Find the imported note page that contains this marker
+                note_pages = [p for p in client.search_pages(exc["title"]) if p.title == exc["title"]]
+                if note_pages:
+                    note_page = note_pages[0]
+                    page_id_clean = note_page.page_id.replace("-", "")
+                    try:
+                        # Find the callout block with this link text
+                        children = client.list_block_children(note_page.page_id)
+                        for block in children:
+                            if block.get("type") == "callout":
+                                block_text = "".join(
+                                    rt.get("text", {}).get("content", "")
+                                    for rt in block.get("callout", {}).get("rich_text", [])
+                                )
+                                if link_text in block_text:
+                                    # Replace callout with inline link paragraph
+                                    client.update_block_with_page_link(
+                                        block["id"], link_text, target_page.url or f"https://notion.so/{target_page.page_id.replace('-', '')}"
+                                    )
+                                    # The replaced block keeps the same ID — it's now the resolved content
+                                    block_id_clean = block["id"].replace("-", "")
+                                    resolved_block_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+                                    resolution_success = True
+                                    break
+                    except Exception as resolve_err:
+                        import logging
+                        logging.getLogger("e2n.webui").warning("Resolution failed for %s: %s", link_text, resolve_err)
+
+                # Update exception row: Status = Resolved, Link = resolved block
+                if resolution_success and note_pages:
+                    try:
+                        all_matches_exc = client.search_pages(exc["title"])
+                        for p in all_matches_exc:
+                            if p.title == exc["title"]:
+                                try:
+                                    update_props: dict = {"Status": {"select": {"name": "Resolved"}}}
+                                    if resolved_block_url:
+                                        update_props["Link"] = {"url": resolved_block_url}
+                                    client._sdk_call(
+                                        client._sdk_client.pages.update,
+                                        page_id=p.page_id,
+                                        properties=update_props,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                if resolution_success:
+                    resolved += 1
+                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title}"})
+                else:
+                    resolved += 1
+                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title} (match found, block update may have failed)"})
+
             elif len(matches) == 0:
                 skipped += 1
                 results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no match found"})
@@ -520,9 +612,54 @@ def create_app() -> FastAPI:
     @app.post("/resolve/acknowledge/{note_id}")
     def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form("")):
         notion_key = _wizard_state.get("notion_key", "")
-        if notion_key and block_id:
-            client = NotionClient(notion_key)
+        if not notion_key:
+            return RedirectResponse(url="/resolve/", status_code=303)
+
+        client = NotionClient(notion_key)
+        exceptions = _load_exceptions_from_processing()
+        note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+        note_title = note_exceptions[0]["title"] if note_exceptions else ""
+
+        # 1. Delete callout marker(s) from the imported page
+        if block_id:
             client.delete_block(block_id)
+        elif note_title:
+            pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+            if pages:
+                try:
+                    children = client.list_block_children(pages[0].page_id)
+                    for block in children:
+                        if block.get("type") == "callout":
+                            client.delete_block(block["id"])
+                except Exception:
+                    pass
+
+        # 2. Update Import-Exceptions row(s) to Status = "Resolved" with Link to resolved content
+        if note_title:
+            try:
+                # Build resolved link — points to the page (marker is deleted, page is clean)
+                resolved_url = ""
+                pages_found = [p for p in client.search_pages(note_title) if p.title == note_title]
+                if pages_found:
+                    resolved_url = pages_found[0].url or f"https://www.notion.so/{pages_found[0].page_id.replace('-', '')}"
+
+                all_matches = client.search_pages(note_title)
+                for p in all_matches:
+                    if p.title == note_title:
+                        try:
+                            update_props: dict = {"Status": {"select": {"name": "Resolved"}}}
+                            if resolved_url:
+                                update_props["Link"] = {"url": resolved_url}
+                            client._sdk_call(
+                                client._sdk_client.pages.update,
+                                page_id=p.page_id,
+                                properties=update_props,
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
         return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.post("/resolve/delete-block")
@@ -716,6 +853,65 @@ def create_app() -> FastAPI:
             if block_id:
                 client.delete_block(block_id)
 
+        return RedirectResponse(url="/resolve/", status_code=303)
+
+    # --- Trivial resolution routes ---
+
+    @app.post("/resolve/delete-empty-pages")
+    def resolve_delete_empty_pages(request: Request):
+        """Batch delete all empty pages (No Content exceptions) from Notion."""
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return RedirectResponse(url="/resolve/", status_code=303)
+        client = NotionClient(notion_key)
+        exceptions = _load_exceptions_from_processing()
+        empty = [e for e in exceptions if "No Content" in e["reasons"]]
+        deleted = 0
+        for exc in empty:
+            pages = [p for p in client.search_pages(exc["title"]) if p.title == exc["title"]]
+            if pages:
+                try:
+                    client.archive_page(pages[0].page_id)
+                    # Update exception row: Resolved, Link cleared (page deleted)
+                    all_matches = client.search_pages(exc["title"])
+                    for p in all_matches:
+                        if p.title == exc["title"]:
+                            try:
+                                client._sdk_call(
+                                    client._sdk_client.pages.update,
+                                    page_id=p.page_id,
+                                    properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}},
+                                )
+                            except Exception:
+                                pass
+                    deleted += 1
+                except Exception:
+                    pass
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_auto_relink_result.html",
+            context={"error": "", "warning": "", "resolved": deleted, "skipped": len(empty) - deleted,
+                     "results": [{"title": e["title"], "link_text": "", "status": "deleted", "reason": "empty page removed"} for e in empty[:deleted]]},
+        )
+
+    @app.post("/resolve/rename-page")
+    def resolve_rename_page(request: Request, note_id: str = Form(""), new_title: str = Form("")):
+        """Rename an 'Empty Title' page in Notion."""
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key or not new_title.strip():
+            return RedirectResponse(url="/resolve/", status_code=303)
+        client = NotionClient(notion_key)
+        # Find the page with "Empty Title"
+        pages = [p for p in client.search_pages("Empty Title") if p.title == "Empty Title"]
+        if pages:
+            try:
+                client._sdk_call(
+                    client._sdk_client.pages.update,
+                    page_id=pages[0].page_id,
+                    properties={"Name": {"title": [{"text": {"content": new_title.strip()}}]}},
+                )
+            except Exception:
+                pass
         return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.get("/wizard/progress")

@@ -5,18 +5,37 @@
 <h1>{{ reason }} Exceptions</h1>
 <p>{{ exceptions | length }} item(s)</p>
 <table>
-  <thead><tr><th>Note</th><th>Title</th><th>Link Text</th><th>Link Value</th></tr></thead>
+  <thead><tr><th>Note</th><th>Title</th><th>Detail</th><th>Action</th></tr></thead>
   <tbody>
   {% for exc in exceptions %}
     <tr>
       <td>{{ exc.note_id }}</td>
       <td>{{ exc.title }}</td>
-      <td>{{ exc.link_text }}</td>
-      <td>{{ exc.link_value }}</td>
+      <td>{{ exc.link_text or exc.error_message or exc.link_value }}</td>
+      <td>
+        {% if "Evernote Link" in exc.reasons %}
+          <em>Auto-relink or manual</em>
+        {% elif "Encrypted" in (exc.error_message or "") or "Encrypted" in exc.reasons %}
+          <a href="/resolve/decrypt/{{ exc.note_id }}">Decrypt</a>
+        {% elif "Empty Title" in exc.reasons %}
+          <form method="post" action="/resolve/rename-page" style="display:inline">
+            <input type="hidden" name="note_id" value="{{ exc.note_id }}">
+            <input type="text" name="new_title" placeholder="New title" size="20" required>
+            <button type="submit">Rename</button>
+          </form>
+        {% elif "No Content" in exc.reasons %}
+          <em>Use "Delete Empty Pages" above</em>
+        {% else %}
+          <form method="post" action="/resolve/acknowledge/{{ exc.note_id }}" style="display:inline">
+            <input type="hidden" name="block_id" value="">
+            <button type="submit">Acknowledge</button>
+          </form>
+        {% endif %}
+      </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
-<p><a href="/resolve/">← Back to dashboard</a></p>
+<p><a href="/resolve/">← Back to Workbench</a> · <a href="/">Home</a></p>
 </body>
 </html>
