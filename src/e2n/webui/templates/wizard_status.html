@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n — Migration Status</title></head>
+<body>
+<h1>Migration Status</h1>
+<table>
+  <tr><td><strong>Current Step</strong></td><td>{{ step }}</td></tr>
+  <tr><td><strong>Source</strong></td><td>{{ source or "Not configured" }}</td></tr>
+  <tr><td><strong>Processing Directory</strong></td><td>{{ processing_dir or "Not configured" }}</td></tr>
+  <tr><td><strong>Notes Extracted</strong></td><td>{{ notes_extracted }}</td></tr>
+  <tr><td><strong>Exceptions</strong></td><td>{{ exception_count }}</td></tr>
+</table>
+<p>
+  <a href="/wizard/">Continue Wizard</a> ·
+  <a href="/resolve/">Resolution Workbench</a> ·
+  <a href="/">Home</a>
+</p>
+</body>
+</html>

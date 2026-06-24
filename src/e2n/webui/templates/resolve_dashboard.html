@@ -24,8 +24,8 @@
 
 <h2>By Page</h2>
 <ul>
-{% for note_id, count in pages.items() %}
-  <li><a href="/resolve/page/{{ note_id }}">{{ note_id }}</a> ({{ count }} exception{{ 's' if count > 1 else '' }})</li>
+{% for note_id, info in pages.items() %}
+  <li><a href="/resolve/page/{{ note_id }}">{{ info.title }}</a> ({{ info.count }} exception{{ 's' if info.count > 1 else '' }})</li>
 {% endfor %}
 </ul>
 </body>

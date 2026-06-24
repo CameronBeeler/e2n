@@ -11,6 +11,7 @@ class ExceptionReason(StrEnum):
     """Reason values for the Notion exception database multi-select field."""
 
     EMPTY_TITLE = "Empty Title"
+    ENCRYPTED = "Encrypted"
     EVERNOTE_LINK = "Evernote Link"
     NO_CONTENT = "No Content"
     UNSUPPORTED_CONTENT = "Unsupported Content"

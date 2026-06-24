@@ -379,6 +379,9 @@ def create_app() -> FastAPI:
                                     exc_url = f"https://www.notion.so/{page_id_clean}"
                                 reasons = exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)
                                 error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
+                                # Detect encrypted content → use "Encrypted" reason
+                                if "Encrypted content" in error_msg:
+                                    reasons = ("Encrypted",)
                                 try:
                                     create_exception_row(
                                         client,
@@ -473,14 +476,17 @@ def create_app() -> FastAPI:
                 reason = reason.strip()
                 if reason:
                     categories[reason] = categories.get(reason, 0) + 1
-        # Group by note for "by page" view
-        pages: dict[str, int] = {}
+        # Group by note for "by page" view — store title + count
+        pages: dict[str, dict] = {}
         for exc in exceptions:
-            pages[exc["note_id"]] = pages.get(exc["note_id"], 0) + 1
+            nid = exc["note_id"]
+            if nid not in pages:
+                pages[nid] = {"title": exc["title"], "count": 0}
+            pages[nid]["count"] += 1
         return templates.TemplateResponse(
             request=request,
             name="resolve_dashboard.html",
-            context={"categories": categories, "pages": pages, "total": len(exceptions)},
+            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: x[1]["count"], reverse=True)), "total": len(exceptions)},
         )
 
     @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
@@ -522,6 +528,10 @@ def create_app() -> FastAPI:
         exceptions = _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
 
+        import logging
+        relink_log = logging.getLogger("e2n.webui.relink")
+        relink_log.info("Auto-relink: found %d Evernote Link exceptions to process", len(link_exceptions))
+
         notion_key = _wizard_state.get("notion_key", "")
         if not notion_key:
             return templates.TemplateResponse(
@@ -544,6 +554,7 @@ def create_app() -> FastAPI:
                 continue
 
             matches = [p for p in client.search_pages(link_text) if p.title == link_text]
+            relink_log.info("  Link '%s': %d exact match(es)", link_text, len(matches))
 
             if len(matches) == 1:
                 # Found exact match — attempt full resolution
@@ -613,6 +624,7 @@ def create_app() -> FastAPI:
                 skipped += 1
                 results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": f"{len(matches)} matches — manual review required"})
 
+        relink_log.info("Auto-relink complete: resolved=%d, skipped=%d", resolved, skipped)
         return templates.TemplateResponse(
             request=request,
             name="resolve_auto_relink_result.html",
@@ -764,20 +776,47 @@ def create_app() -> FastAPI:
                 context={"note_id": note_id, "hint": hint, "error": "No encrypted content found.", "decrypted": ""},
             )
 
-        # Attempt decryption
+        # Attempt decryption — Evernote ENC0 format:
+        # Bytes: "ENC0"(4) + salt(16) + salthmac(16) + IV(16) + ciphertext + HMAC(32)
+        # Key: PBKDF2(passphrase, salt, 50000 iterations, SHA-256) → 128-bit key
         try:
             from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.primitives import padding
+            from cryptography.hazmat.primitives import padding, hashes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            import hmac as _hmac
 
             raw = _b64.b64decode(encrypted_b64)
-            key = _hashlib.md5(passphrase.encode("utf-8")).digest()[:key_length // 8]
-            iv = raw[:16]
-            ciphertext = raw[16:]
 
+            # Parse ENC0 format
+            header = raw[0:4]  # b"ENC0"
+            salt = raw[4:20]
+            salthmac = raw[20:36]
+            iv = raw[36:52]
+            ciphertext = raw[52:-32]
+            stored_hmac = raw[-32:]
+            body = raw[0:-32]
+
+            # Verify HMAC (confirms correct passphrase)
+            kdf_hmac = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salthmac, iterations=50000)
+            key_hmac = kdf_hmac.derive(passphrase.encode("utf-8"))
+            computed_hmac = _hmac.new(key_hmac, body, "sha256").digest()
+            if not _hmac.compare_digest(computed_hmac, stored_hmac):
+                return templates.TemplateResponse(
+                    request=request,
+                    name="resolve_decrypt_result.html",
+                    context={"note_id": note_id, "hint": hint, "error": "Wrong passphrase.", "decrypted": ""},
+                )
+
+            # Derive decryption key
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salt, iterations=50000)
+            key = kdf.derive(passphrase.encode("utf-8"))
+
+            # Decrypt
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
             decryptor = cipher.decryptor()
             padded = decryptor.update(ciphertext) + decryptor.finalize()
 
+            # Remove PKCS7 padding
             unpadder = padding.PKCS7(128).unpadder()
             decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
             decrypted_text = decrypted_bytes.decode("utf-8")
@@ -787,11 +826,14 @@ def create_app() -> FastAPI:
                 name="resolve_decrypt_result.html",
                 context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text},
             )
-        except Exception:
+        except Exception as exc:
+            error_msg = str(exc)
+            if "wrong passphrase" in error_msg.lower() or "padding" in error_msg.lower():
+                error_msg = "Decryption failed — wrong passphrase or corrupted data."
             return templates.TemplateResponse(
                 request=request,
                 name="resolve_decrypt_result.html",
-                context={"note_id": note_id, "hint": hint, "error": "Decryption failed — wrong passphrase or corrupted data.", "decrypted": ""},
+                context={"note_id": note_id, "hint": hint, "error": f"Decryption failed: {error_msg}", "decrypted": ""},
             )
 
     @app.post("/resolve/decrypt-import/{note_id}")
@@ -840,12 +882,16 @@ def create_app() -> FastAPI:
 
         try:
             from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.primitives import padding
+            from cryptography.hazmat.primitives import padding, hashes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
             raw = _b64.b64decode(encrypted_b64)
-            key = _hashlib.md5(passphrase.encode("utf-8")).digest()[:key_length // 8]
-            iv = raw[:16]
-            ciphertext = raw[16:]
+            salt = raw[4:20]
+            iv = raw[36:52]
+            ciphertext = raw[52:-32]
+
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salt, iterations=50000)
+            key = kdf.derive(passphrase.encode("utf-8"))
 
             cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
             decryptor = cipher.decryptor()
@@ -925,6 +971,32 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
         return RedirectResponse(url="/resolve/", status_code=303)
+
+    @app.get("/wizard/status", response_class=HTMLResponse)
+    def wizard_status(request: Request):
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        notes_extracted = int(_wizard_state.get("extracted_count", "0"))
+        step = "Not started"
+        if _wizard_state.get("step4_complete") == "true":
+            step = "Import complete — review exceptions"
+        elif _wizard_state.get("step3_complete") == "true":
+            step = "Extraction complete — ready to import"
+        elif _wizard_state.get("step2_complete") == "true":
+            step = "Connected to Notion — ready to extract"
+        elif _wizard_state.get("step1_complete") == "true":
+            step = "Source configured — connecting to Notion"
+        exceptions = _load_exceptions_from_processing()
+        return templates.TemplateResponse(
+            request=request,
+            name="wizard_status.html",
+            context={
+                "step": step,
+                "notes_extracted": notes_extracted,
+                "exception_count": len(exceptions),
+                "source": _wizard_state.get("enex_source", ""),
+                "processing_dir": _wizard_state.get("processing_directory", ""),
+            },
+        )
 
     @app.get("/wizard/progress")
     def wizard_progress():

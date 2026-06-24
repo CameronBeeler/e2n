@@ -602,24 +602,37 @@ def test_resolve_decrypt_view_requires_passphrase(client, tmp_path) -> None:
 
 def test_resolve_decrypt_post_shows_decrypted_content(client, tmp_path) -> None:
     """POST /resolve/decrypt/{note_id} with correct passphrase should show decrypted text."""
-    # Create an encrypted note using AES-128-CBC (Evernote's format)
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.primitives import padding
-    import base64, hashlib, os
+    from cryptography.hazmat.primitives import padding, hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    import base64, hashlib, os, hmac
 
     passphrase = "mysecret"
     plaintext = b"This is my secret password: hunter2"
 
-    # Evernote uses passphrase → MD5 → AES key (128-bit)
-    key = hashlib.md5(passphrase.encode("utf-8")).digest()
+    # ENC0 format: header(4) + salt(16) + salthmac(16) + IV(16) + ciphertext + HMAC(32)
+    salt = os.urandom(16)
+    salthmac = os.urandom(16)
     iv = os.urandom(16)
+
+    # Derive key
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=16, salt=salt, iterations=50000)
+    key = kdf.derive(passphrase.encode("utf-8"))
+
+    # Encrypt
     padder = padding.PKCS7(128).padder()
     padded = padder.update(plaintext) + padder.finalize()
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
     encryptor = cipher.encryptor()
     ciphertext = encryptor.update(padded) + encryptor.finalize()
-    # Evernote stores: IV + ciphertext, base64 encoded
-    encrypted_b64 = base64.b64encode(iv + ciphertext).decode()
+
+    # Build body and HMAC
+    body = b"ENC0" + salt + salthmac + iv + ciphertext
+    kdf_hmac = PBKDF2HMAC(algorithm=hashes.SHA256(), length=16, salt=salthmac, iterations=50000)
+    key_hmac = kdf_hmac.derive(passphrase.encode("utf-8"))
+    body_hmac = hmac.new(key_hmac, body, "sha256").digest()
+
+    encrypted_b64 = base64.b64encode(body + body_hmac).decode()
 
     source = tmp_path / "Enc.enex"
     source.write_text(
@@ -686,21 +699,31 @@ def test_resolve_decrypt_post_wrong_passphrase_shows_error(client, tmp_path) -> 
 def test_resolve_decrypt_and_import_replaces_block(client, tmp_path) -> None:
     """POST /resolve/decrypt-import/{note_id} should decrypt, create paragraph block, delete marker."""
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.primitives import padding
-    import base64, hashlib, os
+    from cryptography.hazmat.primitives import padding, hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    import base64, hashlib, os, hmac
 
     passphrase = "testpass"
     plaintext = b"My decrypted secret content here"
-    key = hashlib.md5(passphrase.encode("utf-8")).digest()
+
+    salt = os.urandom(16)
+    salthmac = os.urandom(16)
     iv = os.urandom(16)
+
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=16, salt=salt, iterations=50000)
+    key = kdf.derive(passphrase.encode("utf-8"))
     padder = padding.PKCS7(128).padder()
     padded = padder.update(plaintext) + padder.finalize()
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
-    ciphertext = cipher.encryptor().update(padded) + cipher.encryptor().finalize()
-    # Re-encrypt properly (encryptor consumed)
-    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    encryptor = cipher.encryptor()
     ciphertext = encryptor.update(padded) + encryptor.finalize()
-    encrypted_b64 = base64.b64encode(iv + ciphertext).decode()
+
+    body = b"ENC0" + salt + salthmac + iv + ciphertext
+    kdf_hmac = PBKDF2HMAC(algorithm=hashes.SHA256(), length=16, salt=salthmac, iterations=50000)
+    key_hmac = kdf_hmac.derive(passphrase.encode("utf-8"))
+    body_hmac = hmac.new(key_hmac, body, "sha256").digest()
+
+    encrypted_b64 = base64.b64encode(body + body_hmac).decode()
 
     source = tmp_path / "DI.enex"
     source.write_text(
