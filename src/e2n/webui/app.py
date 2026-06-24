@@ -224,8 +224,9 @@ def create_app() -> FastAPI:
         try:
             source = Path(_wizard_state["enex_source"])
             proc_dir = Path(_wizard_state["processing_directory"])
-            extract_enex_notes(source, proc_dir)
+            result = extract_enex_notes(source, proc_dir)
             _wizard_state["step3_complete"] = "true"
+            _wizard_state["extracted_count"] = str(result.total_notes)
             return RedirectResponse(url="/wizard/step/4", status_code=303)
         except Exception as exc:
             return templates.TemplateResponse(
@@ -238,10 +239,11 @@ def create_app() -> FastAPI:
     def wizard_step_4(request: Request):
         if _wizard_state.get("step3_complete") != "true":
             return RedirectResponse(url="/wizard/step/3", status_code=303)
+        count = _wizard_state.get("extracted_count", "0")
         return templates.TemplateResponse(
             request=request,
             name="wizard_step4.html",
-            context={"error": ""},
+            context={"error": "", "note_count": count},
         )
 
     @app.post("/wizard/step/4")
