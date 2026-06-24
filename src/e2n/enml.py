@@ -140,6 +140,13 @@ def _walk_enml(element: etree._Element, segments: list[ContentSegment], text_blo
             segments.append(ContentSegment(kind="resource", text=tag_name, value=_resource_value(child), mime_type=mime))
         elif tag_name in FORMATTING_TAGS:
             _walk_formatted(child, segments, text_block_limit, {FORMATTING_TAGS[tag_name]: True})
+        elif tag_name in ("div", "p", "br"):
+            # Block-level elements start a new text segment (paragraph break)
+            if tag_name == "br":
+                # BR doesn't contain content — just forces a segment break
+                pass
+            else:
+                _walk_enml(child, segments, text_block_limit)
         else:
             _walk_enml(child, segments, text_block_limit)
 

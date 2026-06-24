@@ -344,7 +344,7 @@ class NotionClient:
                 from notion_client import Client
             except ImportError as exc:
                 raise NotionAPIError("Install notion-client to use Notion API features") from exc
-            sdk_client = Client(auth=notion_key, notion_version="2022-06-28")
+            sdk_client = Client(auth=notion_key, notion_version="2026-03-11")
         self._sdk_client = sdk_client
 
     def search_pages(self, query: str | None = None) -> list[NotionPageRef]:
@@ -375,7 +375,7 @@ class NotionClient:
 
         while True:
             body: JsonObject = {
-                "filter": {"property": "object", "value": "database"},
+                "filter": {"property": "object", "value": "data_source"},
                 "page_size": 100,
             }
             if query:
@@ -406,13 +406,39 @@ class NotionClient:
         return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
 
     def create_database(self, parent_page_id: str, title: str, properties: JsonObject) -> NotionDatabaseRef:
-        """Create a child database under a Notion page."""
-        body = {
+        """Create a child database under a Notion page (2026-03-11: DB + data source)."""
+        # Step 1: Create the database container
+        db_body = {
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "title": [{"type": "text", "text": {"content": title}}],
-            "properties": properties,
         }
-        return _database_ref(self._sdk_call(self._sdk_client.databases.create, **body))
+        db_response = self._sdk_call(self._sdk_client.databases.create, **db_body)
+        db_ref = _database_ref(db_response)
+
+        # Step 2: Create the data source with properties
+        if properties:
+            try:
+                ds_body = {
+                    "database_id": db_ref.database_id,
+                    "properties": properties,
+                }
+                self._sdk_call(self._sdk_client.data_sources.create, **ds_body)
+            except Exception:
+                # Fallback: try updating the default data source's properties
+                try:
+                    data_sources = db_response.get("data_sources", [])
+                    if data_sources:
+                        ds_id = data_sources[0].get("id", "")
+                        if ds_id:
+                            self._sdk_call(
+                                self._sdk_client.data_sources.update_properties,
+                                data_source_id=ds_id,
+                                properties=properties,
+                            )
+                except Exception:
+                    pass  # Best effort — DB exists, properties may need manual setup
+
+        return db_ref
 
     def create_database_row(self, database_id: str, title: str, tags: tuple[str, ...] | list[str]) -> NotionPageRef:
         """Create one page row in an import database."""
@@ -457,7 +483,7 @@ class NotionClient:
 
     def archive_page(self, page_id: str) -> NotionPageRef:
         """Archive one Notion page by id for cleanup workflows."""
-        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
+        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, in_trash=True))
 
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
         """Replace a warning placeholder block with a paragraph containing an inline page link."""
@@ -716,15 +742,21 @@ def ensure_child_database(
     """
     existing = _find_child_database(client.search_databases(database_title), parent_page_id, database_title)
     if existing is not None:
-        # Ensure schema has all expected properties (add missing ones)
+        # Ensure schema has all expected properties via data source update
         try:
             props_to_add = {k: v for k, v in properties.items() if k != "Name"}
             if props_to_add:
-                client._sdk_call(
-                    client._sdk_client.databases.update,
-                    database_id=existing.database_id,
-                    properties=props_to_add,
-                )
+                # Get the data source ID from the database
+                db_raw = client._sdk_call(client._sdk_client.databases.retrieve, database_id=existing.database_id)
+                data_sources = db_raw.get("data_sources", [])
+                if data_sources:
+                    ds_id = data_sources[0].get("id", "")
+                    if ds_id:
+                        client._sdk_call(
+                            client._sdk_client.data_sources.update_properties,
+                            data_source_id=ds_id,
+                            properties=props_to_add,
+                        )
         except Exception as exc:
             import logging
             logging.getLogger("e2n.notion").warning("Could not update database schema: %s", exc)

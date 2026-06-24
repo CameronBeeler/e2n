@@ -298,7 +298,7 @@ def create_app() -> FastAPI:
                         content_text = content_el.text or "" if content_el is not None else ""
 
                         segments = plan_enml_segments(content_text)
-                        blocks, _exc = segments_to_notion_blocks(
+                        blocks, exceptions = segments_to_notion_blocks(
                             segments, {}, note_id=note.note_id, note_title=note.title
                         )
                         page_id = client.import_note_blocks(
@@ -309,6 +309,37 @@ def create_app() -> FastAPI:
                         )
                         log.info("Imported note %s → page %s (%d blocks)", note.note_id, page_id, len(blocks))
                         imported_count += 1
+
+                        # Create exception rows for any issues found
+                        if exceptions:
+                            from e2n.notion import create_exception_row
+                            page_id_clean = page_id.replace("-", "")
+                            marker_block_ids: list[str] = []
+                            try:
+                                children = client.list_block_children(page_id)
+                                marker_block_ids = [b["id"] for b in children if b.get("type") == "callout"]
+                            except Exception:
+                                pass
+                            for i, exc in enumerate(exceptions):
+                                if i < len(marker_block_ids):
+                                    block_id_clean = marker_block_ids[i].replace("-", "")
+                                    exc_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+                                else:
+                                    exc_url = f"https://www.notion.so/{page_id_clean}"
+                                reasons = exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)
+                                error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
+                                create_exception_row(
+                                    client,
+                                    exception_database_id=exc_db.database_id,
+                                    note_name=note.title,
+                                    reasons=tuple(str(r) for r in reasons),
+                                    error_message=error_msg,
+                                    source_file=src.name,
+                                    link_text=getattr(exc, "link_text", ""),
+                                    link_value=getattr(exc, "link_value", ""),
+                                    page_url=exc_url,
+                                )
+                            log.info("Created %d exception row(s) for note %s", len(exceptions), note.note_id)
                 finally:
                     store.close()
 
