@@ -330,17 +330,20 @@ def create_app() -> FastAPI:
                                     exc_url = f"https://www.notion.so/{page_id_clean}"
                                 reasons = exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)
                                 error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
-                                create_exception_row(
-                                    client,
-                                    exception_database_id=exc_db.database_id,
-                                    note_name=note.title,
-                                    reasons=tuple(str(r) for r in reasons),
-                                    error_message=error_msg,
-                                    source_file=src.name,
-                                    link_text=getattr(exc, "link_text", ""),
-                                    link_value=getattr(exc, "link_value", ""),
-                                    page_url=exc_url,
-                                )
+                                try:
+                                    create_exception_row(
+                                        client,
+                                        exception_database_id=exc_db.database_id,
+                                        note_name=note.title,
+                                        reasons=tuple(str(r) for r in reasons),
+                                        error_message=error_msg,
+                                        source_file=src.name,
+                                        link_text=getattr(exc, "link_text", ""),
+                                        link_value=getattr(exc, "link_value", ""),
+                                        page_url=exc_url,
+                                    )
+                                except Exception as exc_err:
+                                    log.warning("Could not create exception row: %s", exc_err)
                             log.info("Created %d exception row(s) for note %s", len(exceptions), note.note_id)
                 finally:
                     store.close()
@@ -349,10 +352,11 @@ def create_app() -> FastAPI:
             _wizard_state["step4_complete"] = "true"
             return RedirectResponse(url="/wizard/step/5", status_code=303)
         except Exception as exc:
+            count = _wizard_state.get("extracted_count", "0")
             return templates.TemplateResponse(
                 request=request,
                 name="wizard_step4.html",
-                context={"error": str(exc)},
+                context={"error": str(exc), "note_count": count},
             )
 
     @app.get("/wizard/step/5", response_class=HTMLResponse)

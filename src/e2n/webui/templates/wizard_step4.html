@@ -3,10 +3,13 @@
 <head><title>e2n Wizard - Import</title></head>
 <body>
 <h1>Step 4: Import to Notion</h1>
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if error %}
+<p class="error">{{ error }}</p>
+<p>Import encountered an error. Notes may have been partially imported. You can retry.</p>
+{% endif %}
 <p>{{ note_count }} note(s) extracted. Ready to import into Notion.</p>
 <form method="post" action="/wizard/step/4" onsubmit="disableBtn(this)">
-  <button type="submit">Start Import →</button>
+  <button type="submit">{% if error %}Retry Import →{% else %}Start Import →{% endif %}</button>
 </form>
 <script>function disableBtn(f){var b=f.querySelector('button');b.disabled=true;b.textContent='Importing {{ note_count }} note(s), please wait...';}</script>
 </body>

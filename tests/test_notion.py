@@ -525,7 +525,8 @@ def test_file_block_without_filename_omits_name_key() -> None:
 
 def _make_segment(kind: str, text: str, value: str = "", mime_type: str = ""):
     from e2n.enml import ContentSegment
-    return ContentSegment(kind=kind, text=text, value=value, mime_type=mime_type)  # type: ignore[arg-type]
+    inline = kind in ("text", "http_link")
+    return ContentSegment(kind=kind, text=text, value=value, mime_type=mime_type, inline=inline)  # type: ignore[arg-type]
 
 
 def test_segments_to_notion_blocks_plain_text_becomes_paragraph() -> None:

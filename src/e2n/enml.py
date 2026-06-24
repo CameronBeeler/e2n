@@ -64,6 +64,7 @@ class ContentSegment:
     checked: bool = False
     rows: list | None = None
     annotations: dict | None = None
+    inline: bool = False
 
 
 def plan_enml_segments(content: str, text_block_limit: int = DEFAULT_TEXT_BLOCK_LIMIT) -> tuple[ContentSegment, ...]:
@@ -81,7 +82,7 @@ def plan_enml_segments(content: str, text_block_limit: int = DEFAULT_TEXT_BLOCK_
 
     segments: list[ContentSegment] = []
     _walk_enml(root, segments, text_block_limit)
-    return tuple(segment for segment in segments if segment.text or segment.value or segment.kind == "divider")
+    return tuple(segment for segment in segments if segment.text or segment.value or segment.kind == "divider" or (segment.kind == "text" and not segment.inline))
 
 
 def _is_evernote_link(href: str) -> bool:
@@ -91,7 +92,7 @@ def _is_evernote_link(href: str) -> bool:
 
 def _walk_enml(element: etree._Element, segments: list[ContentSegment], text_block_limit: int) -> None:
     if element.text:
-        segments.extend(_text_segments(element.text, text_block_limit))
+        segments.extend(_text_segments(element.text, text_block_limit, inline=True))
 
     for child in element:
         href = child.attrib.get("href", "")
@@ -140,18 +141,18 @@ def _walk_enml(element: etree._Element, segments: list[ContentSegment], text_blo
             segments.append(ContentSegment(kind="resource", text=tag_name, value=_resource_value(child), mime_type=mime))
         elif tag_name in FORMATTING_TAGS:
             _walk_formatted(child, segments, text_block_limit, {FORMATTING_TAGS[tag_name]: True})
-        elif tag_name in ("div", "p", "br"):
-            # Block-level elements start a new text segment (paragraph break)
-            if tag_name == "br":
-                # BR doesn't contain content — just forces a segment break
-                pass
-            else:
-                _walk_enml(child, segments, text_block_limit)
+        elif tag_name in ("div", "p"):
+            # Block-level boundary: flush previous content, then recurse
+            segments.append(ContentSegment(kind="text", text="", inline=False))
+            _walk_enml(child, segments, text_block_limit)
+        elif tag_name == "br":
+            # BR forces a new non-inline segment
+            segments.append(ContentSegment(kind="text", text="", inline=False))
         else:
             _walk_enml(child, segments, text_block_limit)
 
         if child.tail:
-            segments.extend(_text_segments(child.tail, text_block_limit))
+            segments.extend(_text_segments(child.tail, text_block_limit, inline=True))
 
 
 def _walk_list(element: etree._Element, segments: list[ContentSegment], kind: str, text_block_limit: int) -> None:
@@ -203,11 +204,18 @@ def _parse_table(element: etree._Element) -> list[list[str]]:
     return rows
 
 
-def _text_segments(text: str, text_block_limit: int) -> tuple[ContentSegment, ...]:
-    normalized = " ".join(text.split())
-    if not normalized:
-        return ()
-    return tuple(ContentSegment(kind="text", text=chunk) for chunk in chunk_text(normalized, text_block_limit))
+def _text_segments(text: str, text_block_limit: int, inline: bool = False) -> tuple[ContentSegment, ...]:
+    # Split on line breaks to preserve paragraph structure
+    lines = text.split("\n")
+    segments: list[ContentSegment] = []
+    for line in lines:
+        normalized = " ".join(line.split())
+        if normalized:
+            segments.extend(
+                ContentSegment(kind="text", text=chunk, inline=inline)
+                for chunk in chunk_text(normalized, text_block_limit)
+            )
+    return tuple(segments)
 
 
 def chunk_text(text: str, limit: int = DEFAULT_TEXT_BLOCK_LIMIT) -> tuple[str, ...]:

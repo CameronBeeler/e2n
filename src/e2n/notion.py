@@ -213,13 +213,17 @@ def segments_to_notion_blocks(
         kind = segment.kind
 
         if kind == "text":
-            if segment.annotations:
-                pending_inline.append(annotated_text_span(segment.text, segment.annotations))
-            else:
-                pending_inline.append(plain_text_span(segment.text))
+            if not segment.inline:
+                # Block-level text (from div/p boundary) — new paragraph
+                flush_inline()
+            if segment.text:
+                if segment.annotations:
+                    pending_inline.append(annotated_text_span(segment.text, segment.annotations))
+                else:
+                    pending_inline.append(plain_text_span(segment.text))
 
         elif kind == "http_link":
-            # Inline link annotation — stays within the surrounding paragraph run.
+            # Inline link annotation — stays within the current paragraph run.
             pending_inline.append(link_text_span(segment.text, segment.value))
 
         elif kind == "heading":
@@ -795,8 +799,23 @@ def create_exception_row(
         "parent": {"database_id": exception_database_id},
         "properties": properties,
     }
-    response = client._sdk_call(client._sdk_client.pages.create, **body)
-    return response["id"]
+
+    try:
+        response = client._sdk_call(client._sdk_client.pages.create, **body)
+        return response["id"]
+    except NotionAPIError as exc:
+        if "not a property that exists" in str(exc):
+            # Fallback: create with just the title (schema may not be set up)
+            fallback_body: JsonObject = {
+                "parent": {"database_id": exception_database_id},
+                "properties": {"title": {"title": [{"text": {"content": note_name}}]}},
+            }
+            try:
+                response = client._sdk_call(client._sdk_client.pages.create, **fallback_body)
+                return response["id"]
+            except Exception:
+                pass
+        raise
 
 
 def _select_root_page(pages: list[NotionPageRef], root_title: str | None) -> NotionPageRef | None:
