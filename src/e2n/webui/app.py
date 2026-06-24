@@ -318,7 +318,7 @@ def create_app() -> FastAPI:
                                     local_path = _P(resource_manifest[seg.value])
                                     if local_path.exists() and seg.value not in note_resource_map:
                                         try:
-                                            upload_id = client.upload_file(local_path)
+                                            upload_id = client.upload_file(local_path, mime_type=seg.mime_type)
                                             note_resource_map[seg.value] = f"upload:{upload_id}"
                                         except Exception as upload_err:
                                             log.warning("Upload failed for %s: %s", local_path.name, upload_err)
@@ -341,13 +341,20 @@ def create_app() -> FastAPI:
                         # Append import-time exceptions to exceptions.txt for unified tracking
                         if exceptions:
                             exc_file = output_dir / "exceptions.txt"
+                            existing_lines = set()
+                            if exc_file.exists():
+                                existing_lines = set(exc_file.read_text(encoding="utf-8").strip().splitlines())
                             with exc_file.open("a", encoding="utf-8") as ef:
                                 for exc in exceptions:
                                     reasons = ",".join(str(r) for r in (exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)))
                                     error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
                                     link_text = getattr(exc, "link_text", "")
                                     link_value = getattr(exc, "link_value", "")
-                                    ef.write(f"{note.note_id}\t{note.title}\t{reasons}\t{src.name}\t\t{link_text}\t{link_value}\t{error_msg}\n")
+                                    line = f"{note.note_id}\t{note.title}\t{reasons}\t{src.name}\t\t{link_text}\t{link_value}\t{error_msg}"
+                                    # Deduplicate by checking if this exact line already exists
+                                    if line not in existing_lines:
+                                        ef.write(line + "\n")
+                                        existing_lines.add(line)
 
                         # Create exception rows for any issues found
                         if exceptions:

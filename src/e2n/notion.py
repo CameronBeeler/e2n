@@ -522,26 +522,37 @@ class NotionClient:
         }
         return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
 
-    def upload_file(self, file_path: "Path") -> str:
+    def upload_file(self, file_path: "Path", mime_type: str = "") -> str:
         """Upload a local file via Notion File Upload API and return the upload ID.
 
         Two-step process: create upload object, then send file contents.
         """
         from pathlib import Path as _Path
+        import mimetypes
         local_path = _Path(file_path)
         if not local_path.exists():
             raise NotionAPIError(f"File not found: {file_path}")
+
+        # Determine content type — prefer explicit mime_type, fall back to extension guess
+        content_type = mime_type or mimetypes.guess_type(str(local_path))[0] or ""
+        if not content_type or content_type == "application/octet-stream":
+            # Notion rejects octet-stream — try harder based on extension
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "")
+            if not content_type:
+                raise NotionAPIError(f"Cannot determine content type for: {local_path.name}")
 
         # Step 1: Create upload object
         create_response = self._api("file_uploads", "POST", {})
         upload_id = create_response["id"]
 
         # Step 2: Send file contents via form_data
-        import mimetypes
-        content_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
         file_data = local_path.read_bytes()
-
-        # Use SDK's form_data support for multipart upload
         self._sdk_call(
             self._sdk_client.request,
             path=f"file_uploads/{upload_id}/send",
