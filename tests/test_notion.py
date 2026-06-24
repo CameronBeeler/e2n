@@ -223,7 +223,7 @@ def test_notion_client_can_archive_page() -> None:
 
     assert archived.page_id == "page-1"
     assert archived.title == "Archived"
-    assert sdk_client.pages.updated == [{"page_id": "page-1", "in_trash": True}]
+    assert sdk_client.pages.updated == [{"page_id": "page-1", "archived": True}]
 
 
 def test_multi_select_properties_discard_blanks_and_preserve_order() -> None:

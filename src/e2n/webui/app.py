@@ -292,25 +292,29 @@ def create_app() -> FastAPI:
                         if not note_file.exists():
                             log.warning("Note file missing: %s — skipping", note_file)
                             continue
-                        from lxml import etree
-                        tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
-                        root = tree.getroot()
-                        note_el = root.find("note") if root.tag != "note" else root
-                        content_el = note_el.find("content") if note_el is not None else None
-                        content_text = content_el.text or "" if content_el is not None else ""
+                        try:
+                            from lxml import etree
+                            tree = etree.parse(str(note_file), parser=etree.XMLParser(recover=True))
+                            root = tree.getroot()
+                            note_el = root.find("note") if root.tag != "note" else root
+                            content_el = note_el.find("content") if note_el is not None else None
+                            content_text = content_el.text or "" if content_el is not None else ""
 
-                        segments = plan_enml_segments(content_text)
-                        blocks, exceptions = segments_to_notion_blocks(
-                            segments, {}, note_id=note.note_id, note_title=note.title
-                        )
-                        page_id = client.import_note_blocks(
-                            database_id=import_db.database_id,
-                            title=note.title,
-                            tags=tuple(note.tags),
-                            blocks=blocks,
-                        )
-                        log.info("Imported note %s → page %s (%d blocks)", note.note_id, page_id, len(blocks))
-                        imported_count += 1
+                            segments = plan_enml_segments(content_text)
+                            blocks, exceptions = segments_to_notion_blocks(
+                                segments, {}, note_id=note.note_id, note_title=note.title
+                            )
+                            page_id = client.import_note_blocks(
+                                database_id=import_db.database_id,
+                                title=note.title,
+                                tags=tuple(note.tags),
+                                blocks=blocks,
+                            )
+                            log.info("Imported note %s → page %s (%d blocks)", note.note_id, page_id, len(blocks))
+                            imported_count += 1
+                        except Exception as note_err:
+                            log.error("Failed to import note %s (%s): %s", note.note_id, note.title, note_err)
+                            continue
 
                         # Create exception rows for any issues found
                         if exceptions:

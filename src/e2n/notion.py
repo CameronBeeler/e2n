@@ -69,7 +69,13 @@ def plain_text_span(text: str) -> JsonObject:
 
 def link_text_span(text: str, url: str) -> JsonObject:
     """Build a Notion rich_text element carrying an inline link annotation."""
-    return {"type": "text", "text": {"content": text, "link": {"url": url}}}
+    # Validate URL — Notion only accepts http(s) and mailto
+    if url and (url.startswith("http://") or url.startswith("https://") or url.startswith("mailto:")):
+        return {"type": "text", "text": {"content": text, "link": {"url": url}}}
+    # Invalid, relative, or protocol-less URL — render as plain text with URL shown
+    if url and url != text:
+        return {"type": "text", "text": {"content": f"{text} [{url}]"}}
+    return {"type": "text", "text": {"content": text}}
 
 
 def paragraph_block(rich_text: list[JsonObject]) -> JsonObject:
@@ -348,7 +354,7 @@ class NotionClient:
                 from notion_client import Client
             except ImportError as exc:
                 raise NotionAPIError("Install notion-client to use Notion API features") from exc
-            sdk_client = Client(auth=notion_key, notion_version="2026-03-11")
+            sdk_client = Client(auth=notion_key, notion_version="2022-06-28")
         self._sdk_client = sdk_client
 
     def search_pages(self, query: str | None = None) -> list[NotionPageRef]:
@@ -379,7 +385,7 @@ class NotionClient:
 
         while True:
             body: JsonObject = {
-                "filter": {"property": "object", "value": "data_source"},
+                "filter": {"property": "object", "value": "database"},
                 "page_size": 100,
             }
             if query:
@@ -410,40 +416,13 @@ class NotionClient:
         return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
 
     def create_database(self, parent_page_id: str, title: str, properties: JsonObject) -> NotionDatabaseRef:
-        """Create a child database under a Notion page with properties."""
-        # Try creating with properties included (works on some API versions)
-        db_body: JsonObject = {
+        """Create a child database under a Notion page."""
+        body = {
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "title": [{"type": "text", "text": {"content": title}}],
             "properties": properties,
         }
-        try:
-            db_response = self._sdk_call(self._sdk_client.databases.create, **db_body)
-            return _database_ref(db_response)
-        except NotionAPIError:
-            pass
-
-        # Fallback: create without properties, then update to add them
-        db_body_no_props: JsonObject = {
-            "parent": {"type": "page_id", "page_id": parent_page_id},
-            "title": [{"type": "text", "text": {"content": title}}],
-        }
-        db_response = self._sdk_call(self._sdk_client.databases.create, **db_body_no_props)
-        db_ref = _database_ref(db_response)
-
-        # Try adding properties via databases.update
-        if properties:
-            try:
-                self._sdk_call(
-                    self._sdk_client.databases.update,
-                    database_id=db_ref.database_id,
-                    properties=properties,
-                )
-            except Exception:
-                import logging
-                logging.getLogger("e2n.notion").warning("Could not add properties to database %s", db_ref.database_id)
-
-        return db_ref
+        return _database_ref(self._sdk_call(self._sdk_client.databases.create, **body))
 
     def create_database_row(self, database_id: str, title: str, tags: tuple[str, ...] | list[str]) -> NotionPageRef:
         """Create one page row in an import database."""
@@ -488,7 +467,7 @@ class NotionClient:
 
     def archive_page(self, page_id: str) -> NotionPageRef:
         """Archive one Notion page by id for cleanup workflows."""
-        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, in_trash=True))
+        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
 
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
         """Replace a warning placeholder block with a paragraph containing an inline page link."""
@@ -749,7 +728,7 @@ def ensure_child_database(
     if existing is not None:
         # Ensure schema has all expected properties
         try:
-            props_to_add = {k: v for k, v in properties.items() if k != "Name"}
+            props_to_add = {k: v for k, v in properties.items() if k != "Name" and k != "Note Name"}
             if props_to_add:
                 client._sdk_call(
                     client._sdk_client.databases.update,
