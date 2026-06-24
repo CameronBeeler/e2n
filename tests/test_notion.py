@@ -254,7 +254,7 @@ def test_unsupported_content_marker_block_uses_error_comment() -> None:
                     },
                 }
             ],
-            "icon": {"type": "emoji", "emoji": "!"},
+            "icon": {"type": "emoji", "emoji": "❗"},
             "color": "yellow_background",
         },
     }

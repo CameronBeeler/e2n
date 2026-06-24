@@ -410,37 +410,38 @@ class NotionClient:
         return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
 
     def create_database(self, parent_page_id: str, title: str, properties: JsonObject) -> NotionDatabaseRef:
-        """Create a child database under a Notion page (2026-03-11: DB + data source)."""
-        # Step 1: Create the database container
-        db_body = {
+        """Create a child database under a Notion page with properties."""
+        # Try creating with properties included (works on some API versions)
+        db_body: JsonObject = {
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [{"type": "text", "text": {"content": title}}],
+            "properties": properties,
+        }
+        try:
+            db_response = self._sdk_call(self._sdk_client.databases.create, **db_body)
+            return _database_ref(db_response)
+        except NotionAPIError:
+            pass
+
+        # Fallback: create without properties, then update to add them
+        db_body_no_props: JsonObject = {
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "title": [{"type": "text", "text": {"content": title}}],
         }
-        db_response = self._sdk_call(self._sdk_client.databases.create, **db_body)
+        db_response = self._sdk_call(self._sdk_client.databases.create, **db_body_no_props)
         db_ref = _database_ref(db_response)
 
-        # Step 2: Create the data source with properties
+        # Try adding properties via databases.update
         if properties:
             try:
-                ds_body = {
-                    "database_id": db_ref.database_id,
-                    "properties": properties,
-                }
-                self._sdk_call(self._sdk_client.data_sources.create, **ds_body)
+                self._sdk_call(
+                    self._sdk_client.databases.update,
+                    database_id=db_ref.database_id,
+                    properties=properties,
+                )
             except Exception:
-                # Fallback: try updating the default data source's properties
-                try:
-                    data_sources = db_response.get("data_sources", [])
-                    if data_sources:
-                        ds_id = data_sources[0].get("id", "")
-                        if ds_id:
-                            self._sdk_call(
-                                self._sdk_client.data_sources.update_properties,
-                                data_source_id=ds_id,
-                                properties=properties,
-                            )
-                except Exception:
-                    pass  # Best effort — DB exists, properties may need manual setup
+                import logging
+                logging.getLogger("e2n.notion").warning("Could not add properties to database %s", db_ref.database_id)
 
         return db_ref
 
@@ -641,7 +642,7 @@ def unsupported_content_marker_block(record: UnsupportedContentRecord) -> JsonOb
         "type": "callout",
         "callout": {
             "rich_text": [{"type": "text", "text": {"content": record.marker_text}}],
-            "icon": {"type": "emoji", "emoji": "!"},
+            "icon": {"type": "emoji", "emoji": "❗"},
             "color": "yellow_background",
         },
     }
@@ -746,21 +747,15 @@ def ensure_child_database(
     """
     existing = _find_child_database(client.search_databases(database_title), parent_page_id, database_title)
     if existing is not None:
-        # Ensure schema has all expected properties via data source update
+        # Ensure schema has all expected properties
         try:
             props_to_add = {k: v for k, v in properties.items() if k != "Name"}
             if props_to_add:
-                # Get the data source ID from the database
-                db_raw = client._sdk_call(client._sdk_client.databases.retrieve, database_id=existing.database_id)
-                data_sources = db_raw.get("data_sources", [])
-                if data_sources:
-                    ds_id = data_sources[0].get("id", "")
-                    if ds_id:
-                        client._sdk_call(
-                            client._sdk_client.data_sources.update_properties,
-                            data_source_id=ds_id,
-                            properties=props_to_add,
-                        )
+                client._sdk_call(
+                    client._sdk_client.databases.update,
+                    database_id=existing.database_id,
+                    properties=props_to_add,
+                )
         except Exception as exc:
             import logging
             logging.getLogger("e2n.notion").warning("Could not update database schema: %s", exc)
