@@ -69,18 +69,33 @@ if ! "$PYTHON" -m pip --version &>/dev/null; then
 fi
 ok "pip: available"
 
-# --- Notion check ---
-if command -v notion &>/dev/null; then
-    ok "Notion: desktop app detected"
-elif command -v ntn &>/dev/null; then
-    ok "Notion: CLI (ntn) detected"
-elif [ -d "/Applications/Notion.app" ] || [ -d "$HOME/Applications/Notion.app" ]; then
-    ok "Notion: desktop app detected"
-else
-    warn "Notion desktop app not detected"
-    echo "  The Notion app is required to use your imported content."
-    echo "  Download: https://www.notion.so/desktop"
+# --- Notion app check (required) ---
+NOTION_FOUND=false
+if [ -d "/Applications/Notion.app" ]; then
+    ok "Notion app: installed (/Applications/Notion.app)"
+    NOTION_FOUND=true
+elif [ -d "$HOME/Applications/Notion.app" ]; then
+    ok "Notion app: installed (~$HOME/Applications/Notion.app)"
+    NOTION_FOUND=true
+elif [ "$PLATFORM" = "linux" ] && command -v notion-app &>/dev/null; then
+    ok "Notion app: installed (notion-app)"
+    NOTION_FOUND=true
+elif [ "$PLATFORM" = "linux" ] && (snap list 2>/dev/null | grep -q notion || flatpak list 2>/dev/null | grep -qi notion); then
+    ok "Notion app: installed (snap/flatpak)"
+    NOTION_FOUND=true
+fi
+
+if [ "$NOTION_FOUND" = false ]; then
+    fail "Notion app is not installed."
     echo ""
+    echo "  The Notion desktop app is required to view your imported content."
+    if [ "$PLATFORM" = "macos" ]; then
+        echo "  Download: https://www.notion.so/desktop"
+    else
+        echo "  Download: https://www.notion.so/desktop"
+        echo "  Or: sudo snap install notion-snap-reborn"
+    fi
+    exit 1
 fi
 
 # --- Venv check ---

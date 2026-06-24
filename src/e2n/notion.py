@@ -519,15 +519,29 @@ class NotionClient:
         initial = blocks[:100]
         overflow = blocks[100:]
 
+        properties: JsonObject = {
+            "Name": {"title": [{"text": {"content": title}}]},
+        }
+        if tags:
+            properties[IMPORT_TAGS_PROPERTY] = import_tags_property(tags)
+
         body: JsonObject = {
             "parent": {"database_id": database_id},
-            "properties": {
-                "Name": {"title": [{"text": {"content": title}}]},
-                IMPORT_TAGS_PROPERTY: import_tags_property(tags),
-            },
+            "properties": properties,
             "children": initial,
         }
-        page = self._sdk_call(self._sdk_client.pages.create, **body)
+
+        try:
+            page = self._sdk_call(self._sdk_client.pages.create, **body)
+        except NotionAPIError as exc:
+            if "not a property that exists" in str(exc) and IMPORT_TAGS_PROPERTY in str(exc):
+                # Tags property doesn't exist on this database — retry without it
+                properties.pop(IMPORT_TAGS_PROPERTY, None)
+                body["properties"] = properties
+                page = self._sdk_call(self._sdk_client.pages.create, **body)
+            else:
+                raise
+
         page_id = page["id"]
 
         if overflow:
@@ -711,8 +725,9 @@ def ensure_child_database(
                     database_id=existing.database_id,
                     properties=props_to_add,
                 )
-        except Exception:
-            pass  # Best effort — database still usable even if schema update fails
+        except Exception as exc:
+            import logging
+            logging.getLogger("e2n.notion").warning("Could not update database schema: %s", exc)
         return existing
     return client.create_database(parent_page_id, database_title, properties)
 
