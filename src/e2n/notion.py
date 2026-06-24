@@ -821,6 +821,7 @@ def create_exception_row(
     properties: JsonObject = {
         "Note Name": {"title": [{"text": {"content": note_name}}]},
         EXCEPTION_REASON_PROPERTY: exception_reason_property(reasons),
+        EXCEPTION_STATUS_PROPERTY: {"select": {"name": "Open"}},
     }
     if error_message:
         properties["Error Message"] = {"rich_text": [{"text": {"content": error_message[:2000]}}]}
@@ -828,8 +829,8 @@ def create_exception_row(
         properties["Source File"] = {"rich_text": [{"text": {"content": source_file[:2000]}}]}
     if link_text:
         properties["Linkable Text"] = {"rich_text": [{"text": {"content": link_text[:2000]}}]}
-    if link_value:
-        properties["Linkable Text"] = {"rich_text": [{"text": {"content": link_value[:2000]}}]}
+    if link_value and link_value != link_text:
+        properties["External Resource"] = {"rich_text": [{"text": {"content": link_value[:2000]}}]}
     if page_url:
         properties["Link"] = {"url": page_url}
 

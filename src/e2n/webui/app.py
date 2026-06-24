@@ -341,20 +341,25 @@ def create_app() -> FastAPI:
                         # Append import-time exceptions to exceptions.txt for unified tracking
                         if exceptions:
                             exc_file = output_dir / "exceptions.txt"
-                            existing_lines = set()
+                            existing_keys = set()
                             if exc_file.exists():
-                                existing_lines = set(exc_file.read_text(encoding="utf-8").strip().splitlines())
+                                for line in exc_file.read_text(encoding="utf-8").strip().splitlines():
+                                    parts = line.split("\t")
+                                    # Dedup key: note_id + reason + link_text
+                                    if len(parts) >= 6:
+                                        existing_keys.add(f"{parts[0]}:{parts[2]}:{parts[5]}")
+                                    elif len(parts) >= 3:
+                                        existing_keys.add(f"{parts[0]}:{parts[2]}:")
                             with exc_file.open("a", encoding="utf-8") as ef:
                                 for exc in exceptions:
                                     reasons = ",".join(str(r) for r in (exc.reasons if hasattr(exc, "reasons") else ("Unsupported Content",)))
                                     error_msg = exc.error_comment if hasattr(exc, "error_comment") else getattr(exc, "marker_text", "")
                                     link_text = getattr(exc, "link_text", "")
                                     link_value = getattr(exc, "link_value", "")
-                                    line = f"{note.note_id}\t{note.title}\t{reasons}\t{src.name}\t\t{link_text}\t{link_value}\t{error_msg}"
-                                    # Deduplicate by checking if this exact line already exists
-                                    if line not in existing_lines:
-                                        ef.write(line + "\n")
-                                        existing_lines.add(line)
+                                    dedup_key = f"{note.note_id}:{reasons}:{link_text}"
+                                    if dedup_key not in existing_keys:
+                                        ef.write(f"{note.note_id}\t{note.title}\t{reasons}\t{src.name}\t\t{link_text}\t{link_value}\t{error_msg}\n")
+                                        existing_keys.add(dedup_key)
 
                         # Create exception rows for any issues found
                         if exceptions:
