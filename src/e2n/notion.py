@@ -344,7 +344,7 @@ class NotionClient:
                 from notion_client import Client
             except ImportError as exc:
                 raise NotionAPIError("Install notion-client to use Notion API features") from exc
-            sdk_client = Client(auth=notion_key)
+            sdk_client = Client(auth=notion_key, notion_version="2022-06-28")
         self._sdk_client = sdk_client
 
     def search_pages(self, query: str | None = None) -> list[NotionPageRef]:
@@ -375,7 +375,7 @@ class NotionClient:
 
         while True:
             body: JsonObject = {
-                "filter": {"property": "object", "value": "data_source"},
+                "filter": {"property": "object", "value": "database"},
                 "page_size": 100,
             }
             if query:
