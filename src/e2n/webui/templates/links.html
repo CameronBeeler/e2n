@@ -31,7 +31,7 @@
       <td style="font-size:0.85em; max-width:200px; overflow:hidden; text-overflow:ellipsis;">
         {{ info.sources[:3] | join(", ") }}{% if info.sources | length > 3 %} +{{ info.sources | length - 3 }} more{% endif %}
       </td>
-      <td><strong>{{ name }}</strong></td>
+      <td>{{ name }}</td>
       <td>{{ info.count }}</td>
       <td>
         <form method="post" action="/links/resolve" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving...';">
