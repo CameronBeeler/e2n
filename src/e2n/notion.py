@@ -506,12 +506,8 @@ class NotionClient:
         return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
 
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
-        """Replace a warning placeholder block's content with an inline page link.
-
-        Updates the block in-place. Tries paragraph first (type change),
-        falls back to updating as callout with link content.
-        """
-        # Try updating as paragraph (may fail if block type can't change)
+        """Replace a block with a simple inline page link (paragraph with underlined link text)."""
+        # Try updating as paragraph (type change — works if block type is already paragraph)
         try:
             body = {
                 "paragraph": {
@@ -522,20 +518,20 @@ class NotionClient:
         except NotionAPIError:
             pass
 
-        # Fallback: update the callout content to show the link (keeps callout type)
+        # Fallback: update as callout but with simple link text (no emoji, no color)
         try:
             body = {
                 "callout": {
-                    "rich_text": [{"type": "text", "text": {"content": f"✅ {link_text}", "link": {"url": page_url}}}],
-                    "icon": {"type": "emoji", "emoji": "✅"},
-                    "color": "green_background",
+                    "rich_text": [{"type": "text", "text": {"content": link_text, "link": {"url": page_url}}}],
+                    "icon": {"type": "emoji", "emoji": "🔗"},
+                    "color": "default",
                 }
             }
             return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
         except NotionAPIError:
             pass
 
-        # Last resort: delete old block and note that content was resolved
+        # Last resort: delete and append new paragraph
         self.delete_block(block_id)
         return {}
 
