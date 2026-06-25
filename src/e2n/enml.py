@@ -132,7 +132,8 @@ def _walk_enml(element: etree._Element, segments: list[ContentSegment], text_blo
                 child.tail = None
         elif tag_name == "en-crypt":
             hint = child.attrib.get("hint", "")
-            segments.append(ContentSegment(kind="encrypted", text="en-crypt", value=hint))
+            encrypted_b64 = (child.text or "").strip()
+            segments.append(ContentSegment(kind="encrypted", text=encrypted_b64, value=hint))
         elif tag_name == "table":
             rows = _parse_table(child)
             segments.append(ContentSegment(kind="table", text="table", rows=rows))

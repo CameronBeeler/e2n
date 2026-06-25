@@ -439,6 +439,7 @@ def _execute_import_note(notion: NotionClient, payload: dict) -> str:
                 link_text=getattr(exc, "link_text", ""),
                 link_value=getattr(exc, "link_value", ""),
                 page_url=exc_url,
+                encrypted_content=getattr(exc, "encrypted_content", ""),
             )
 
     return page_id

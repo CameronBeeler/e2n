@@ -18,43 +18,67 @@
   <button type="submit">Auto-Resolve All Links →</button>
 </form>
 
-<h2>Resolve by Target</h2>
+{% if exists_targets %}
+<h2>Link Page Exists</h2>
 <table>
   <thead>
     <tr>
-      <th>Source Page(s)</th>
       <th>Link Target</th>
-      <th>Count</th>
-      <th>Action</th>
-      <th style="padding-left:2em;">Manual Override</th>
+      <th>Import Page</th>
+      <th>Link Count</th>
+      <th>Resolve</th>
     </tr>
   </thead>
   <tbody>
-  {% for name, info in targets %}
+  {% for name, info in exists_targets %}
     <tr>
-      <td style="font-size:0.85em; max-width:200px; overflow:hidden; text-overflow:ellipsis;">
-        {{ info.sources[:3] | join(", ") }}{% if info.sources | length > 3 %} +{{ info.sources | length - 3 }} more{% endif %}
-      </td>
+      <td>{{ name }}</td>
       <td>{{ name }}</td>
       <td>{{ info.count }}</td>
       <td>
         <form method="post" action="/links/resolve" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving...';">
           <input type="hidden" name="page_name" value="{{ name }}">
-          <input type="hidden" name="search_source" value="Evernote Import">
           <button type="submit">Resolve {{ info.count }} →</button>
-        </form>
-      </td>
-      <td style="padding-left:2em;">
-        <form method="post" action="/links/resolve" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Linking...';">
-          <input type="hidden" name="page_name" value="{{ name }}">
-          <input type="text" name="override_target" placeholder="Actual page name" size="20">
-          <button type="submit">Link to →</button>
         </form>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+{% endif %}
+
+{% if missing_targets %}
+<h2>No Link Page Exists</h2>
+<p style="font-size:0.85em; color:#666;">It may exist by another name, but we didn't find it. Enter the exact page name (spaces, capitalization matter).</p>
+<table>
+  <thead>
+    <tr>
+      <th>Link Target</th>
+      <th>Import Page Override</th>
+      <th>Link Count</th>
+      <th>Resolve</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for name, info in missing_targets %}
+    <tr>
+      <td>{{ name }}</td>
+      <td>
+        <form method="post" action="/links/resolve" id="override-form-{{ loop.index }}" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Linking...';">
+          <input type="hidden" name="page_name" value="{{ name }}">
+          <input type="text" name="override_target" placeholder="Exact page name" size="20">
+      </td>
+      <td>{{ info.count }}</td>
+      <td>
+          <button type="submit">Resolve {{ info.count }} →</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 {% endif %}
 
 <p><a href="/">← Home</a></p>

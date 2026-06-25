@@ -67,6 +67,7 @@ class UnsupportedContentRecord:
     error_comment: str
     source_path: Path | None = None
     resource_paths: tuple[Path, ...] = field(default_factory=tuple)
+    encrypted_content: str = ""
 
     @property
     def reasons(self) -> tuple[ExceptionReason, ...]:
