@@ -9,28 +9,38 @@
 <p>No Evernote links to resolve!</p>
 {% else %}
 <h2>Auto-Resolve All</h2>
-<p>Process all link targets from most-referenced to least. Only resolves where an exact page match exists.</p>
+<p>Process all link targets from most-referenced to least. Only resolves where an exact page match exists in the import databases.</p>
 <form method="post" action="/links/resolve-all" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving all, please wait...';">
   <button type="submit">Auto-Resolve All Links →</button>
 </form>
 
-<h2>Resolve by Target Page</h2>
-<p>Select a page name to batch-resolve all references to it. For orphan links (no matching page), use manual override.</p>
+<h2>Resolve by Target</h2>
 <table>
-  <thead><tr><th>Target Page Name</th><th>References</th><th>Action</th><th>Manual Override</th></tr></thead>
-  <tbody>
-  {% for name, count in targets %}
+  <thead>
     <tr>
-      <td>{{ name }}</td>
-      <td>{{ count }}</td>
+      <th>Source Page(s)</th>
+      <th>Link Target</th>
+      <th>Count</th>
+      <th>Action</th>
+      <th style="padding-left:2em;">Manual Override</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for name, info in targets %}
+    <tr>
+      <td style="font-size:0.85em; max-width:200px; overflow:hidden; text-overflow:ellipsis;">
+        {{ info.sources[:3] | join(", ") }}{% if info.sources | length > 3 %} +{{ info.sources | length - 3 }} more{% endif %}
+      </td>
+      <td><strong>{{ name }}</strong></td>
+      <td>{{ info.count }}</td>
       <td>
         <form method="post" action="/links/resolve" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving...';">
           <input type="hidden" name="page_name" value="{{ name }}">
           <input type="hidden" name="search_source" value="Evernote Import">
-          <button type="submit">Resolve {{ count }} →</button>
+          <button type="submit">Resolve {{ info.count }} →</button>
         </form>
       </td>
-      <td>
+      <td style="padding-left:2em;">
         <form method="post" action="/links/resolve" style="display:inline">
           <input type="hidden" name="page_name" value="{{ name }}">
           <input type="text" name="override_target" placeholder="Actual page name" size="20">

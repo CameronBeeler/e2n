@@ -543,7 +543,7 @@ def create_app() -> FastAPI:
         return exceptions
 
     # Cached exceptions from Notion (invalidated on resolution actions)
-    _cache: dict[str, list[dict] | None] = {"notion_exceptions": None}
+    _cache: dict[str, list[dict] | None] = {"notion_exceptions": None, "exc_db_id": None}
 
     def _invalidate_exceptions_cache():
         _cache["notion_exceptions"] = None
@@ -559,10 +559,14 @@ def create_app() -> FastAPI:
             return []
         try:
             client = NotionClient(notion_key)
-            bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root)
-            exc_db = ensure_exception_database(client, bootstrap_result.exceptions.page_id)
+            # Cache the exceptions database ID to avoid repeated bootstrap calls
+            if not _cache.get("exc_db_id"):
+                bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root)
+                exc_db = ensure_exception_database(client, bootstrap_result.exceptions.page_id)
+                _cache["exc_db_id"] = exc_db.database_id
+            exc_db_id = _cache["exc_db_id"]
             # Query all rows from the exception database
-            results = client._api(f"databases/{exc_db.database_id}/query", "POST", {})
+            results = client._api(f"databases/{exc_db_id}/query", "POST", {})
             exceptions: list[dict] = []
             for page in results.get("results", []):
                 props = page.get("properties", {})
@@ -688,12 +692,15 @@ def create_app() -> FastAPI:
             # Exclude exceptions database pages
             notion_root_ar = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
             exc_pid = ""
+            exc_db_id = ""
             try:
                 br_ar = bootstrap_notion_pages(notion_key, root_title=notion_root_ar if notion_root_ar else None)
                 exc_pid = br_ar.exceptions.page_id
+                exc_db_obj = ensure_exception_database(client, exc_pid)
+                exc_db_id = exc_db_obj.database_id
             except Exception:
                 pass
-            matches = [p for p in all_found if p.parent_page_id != exc_pid] if exc_pid else all_found
+            matches = [p for p in all_found if p.parent_page_id not in (exc_pid, exc_db_id)] if (exc_pid or exc_db_id) else all_found
             relink_log.info("  Link '%s': %d match(es) in imports", link_text, len(matches))
 
             if len(matches) == 1:
@@ -1093,14 +1100,19 @@ def create_app() -> FastAPI:
         """Show unique link targets and how many exceptions reference each."""
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
-        # Group by link_text (the target page name)
-        targets: dict[str, int] = {}
+        # Group by link_text (the target page name), track source pages
+        targets: dict[str, dict] = {}
         for exc in link_exceptions:
             lt = exc.get("link_text", "").strip()
             if lt:
-                targets[lt] = targets.get(lt, 0) + 1
+                if lt not in targets:
+                    targets[lt] = {"count": 0, "sources": []}
+                targets[lt]["count"] += 1
+                src_title = exc.get("title", "")
+                if src_title and src_title not in targets[lt]["sources"]:
+                    targets[lt]["sources"].append(src_title)
         # Sort by count desc, then alpha
-        sorted_targets = sorted(targets.items(), key=lambda x: (-x[1], x[0]))
+        sorted_targets = sorted(targets.items(), key=lambda x: (-x[1]["count"], x[0]))
         return templates.TemplateResponse(
             request=request,
             name="links.html",
@@ -1136,19 +1148,22 @@ def create_app() -> FastAPI:
         total_failed = 0
         results: list[dict] = []
 
-        # Get exceptions page_id to exclude from searches
+        # Get exceptions page_id AND database_id to exclude from searches
         notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
         exc_page_id = ""
+        exc_db_id_excl = ""
         try:
             br = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
             exc_page_id = br.exceptions.page_id
+            exc_db_obj = ensure_exception_database(client, exc_page_id)
+            exc_db_id_excl = exc_db_obj.database_id
         except Exception:
             pass
 
         for page_name, refs in sorted_targets:
             # Find target page in import databases (exclude exceptions)
             all_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
-            target_matches = [p for p in all_matches if p.parent_page_id != exc_page_id] if exc_page_id else all_matches
+            target_matches = [p for p in all_matches if p.parent_page_id not in (exc_page_id, exc_db_id_excl)] if (exc_page_id or exc_db_id_excl) else all_matches
             if not target_matches:
                 total_failed += len(refs)
                 results.append({"title": page_name, "status": "skipped", "reason": f"page not found in imports ({len(refs)} refs)"})
@@ -1207,12 +1222,15 @@ def create_app() -> FastAPI:
         # Exclude pages under Import-Exceptions (those are exception rows, not imported pages)
         notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
         exc_page_id = ""
+        exc_db_id_excl = ""
         try:
             bootstrap_result = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
             exc_page_id = bootstrap_result.exceptions.page_id
+            exc_db_obj = ensure_exception_database(client, exc_page_id)
+            exc_db_id_excl = exc_db_obj.database_id
         except Exception:
             pass
-        target_matches = [p for p in all_matches if p.parent_page_id != exc_page_id] if exc_page_id else all_matches
+        target_matches = [p for p in all_matches if p.parent_page_id not in (exc_page_id, exc_db_id_excl)] if (exc_page_id or exc_db_id_excl) else all_matches
         if not target_matches:
             return templates.TemplateResponse(
                 request=request, name="links_result.html",
@@ -1302,8 +1320,39 @@ def create_app() -> FastAPI:
     @app.get("/passwords/", response_class=HTMLResponse)
     def passwords_home(request: Request):
         """First-class password management — lists all encrypted items from Import-Exceptions."""
-        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
-        encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
+        # Load ALL exceptions (including resolved) for password audit view
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
+        all_exceptions: list[dict] = []
+        if notion_key and notion_root:
+            try:
+                client = NotionClient(notion_key)
+                exc_db_id = _cache.get("exc_db_id")
+                if not exc_db_id:
+                    br = bootstrap_notion_pages(notion_key, root_title=notion_root)
+                    exc_db = ensure_exception_database(client, br.exceptions.page_id)
+                    exc_db_id = exc_db.database_id
+                    _cache["exc_db_id"] = exc_db_id
+                results = client._api(f"databases/{exc_db_id}/query", "POST", {})
+                for page in results.get("results", []):
+                    props = page.get("properties", {})
+                    title_items = props.get("Note Name", {}).get("title", [])
+                    title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+                    reason_items = props.get("Reason", {}).get("multi_select", [])
+                    reasons = ",".join(r.get("name", "") for r in reason_items)
+                    status_obj = props.get("Status", {}).get("select")
+                    status = status_obj.get("name", "") if status_obj else "Open"
+                    error_items = props.get("Error Message", {}).get("rich_text", [])
+                    error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
+                    all_exceptions.append({
+                        "note_id": page["id"], "title": title, "reasons": reasons,
+                        "error_message": error_msg, "status": status,
+                    })
+            except Exception:
+                pass
+        if not all_exceptions:
+            all_exceptions = _load_exceptions_from_processing()
+        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") or "encrypted" in e.get("error_message", "").lower() or "passphrase" in e.get("error_message", "").lower()]
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
