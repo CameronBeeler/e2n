@@ -678,70 +678,30 @@ def create_app() -> FastAPI:
             relink_log.info("  Link '%s': %d exact match(es)", link_text, len(matches))
 
             if len(matches) == 1:
-                # Found exact match — attempt full resolution
                 target_page = matches[0]
-                resolution_success = False
-                resolved_block_url = ""
-
-                # Find the imported note page that contains this marker
-                note_pages = [p for p in client.search_pages(exc["title"]) if p.title == exc["title"]]
-                if note_pages:
-                    note_page = note_pages[0]
-                    page_id_clean = note_page.page_id.replace("-", "")
+                target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace(chr(45), chr(32)).replace(chr(32), chr(32))}"
+                block_url = exc.get("block_url", "")
+                exc_row_id = exc.get("note_id", "")
+                block_id = ""
+                if "#" in block_url:
+                    bid = block_url.split("#")[-1]
+                    block_id = f"{bid[:8]}-{bid[8:12]}-{bid[12:16]}-{bid[16:20]}-{bid[20:]}" if len(bid) == 32 else bid
+                if block_id:
                     try:
-                        # Find the callout block with this link text
-                        children = client.list_block_children(note_page.page_id)
-                        for block in children:
-                            if block.get("type") == "callout":
-                                block_text = "".join(
-                                    rt.get("text", {}).get("content", "")
-                                    for rt in block.get("callout", {}).get("rich_text", [])
-                                )
-                                if link_text in block_text:
-                                    # Replace callout with inline link paragraph
-                                    client.update_block_with_page_link(
-                                        block["id"], link_text, target_page.url or f"https://notion.so/{target_page.page_id.replace('-', '')}"
-                                    )
-                                    # The replaced block keeps the same ID — it's now the resolved content
-                                    block_id_clean = block["id"].replace("-", "")
-                                    resolved_block_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
-                                    resolution_success = True
-                                    break
-                    except Exception as resolve_err:
-                        import logging
-                        logging.getLogger("e2n.webui").warning("Resolution failed for %s: %s", link_text, resolve_err)
-
-                # Update exception row: Status = Resolved, Link = resolved block
-                if resolution_success and note_pages:
-                    try:
-                        all_matches_exc = client.search_pages(exc["title"])
-                        for p in all_matches_exc:
-                            if p.title == exc["title"]:
-                                try:
-                                    update_props: dict = {"Status": {"select": {"name": "Resolved"}}}
-                                    if resolved_block_url:
-                                        update_props["Link"] = {"url": resolved_block_url}
-                                    client._sdk_call(
-                                        client._sdk_client.pages.update,
-                                        page_id=p.page_id,
-                                        properties=update_props,
-                                    )
-                                except Exception:
-                                    pass
+                        client.update_block_with_page_link(block_id, link_text, target_url)
+                        if exc_row_id:
+                            try:
+                                client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url}})
+                            except Exception:
+                                pass
+                        resolved += 1
+                        results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"-> {target_page.title}"})
                     except Exception:
-                        pass
-
-                if resolution_success:
-                    resolved += 1
-                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title}"})
+                        skipped += 1
+                        results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "block update failed"})
                 else:
-                    resolved += 1
-                    results.append({"title": exc["title"], "link_text": link_text, "status": "resolved", "reason": f"→ {target_page.title} (match found, block update may have failed)"})
-
-            elif len(matches) == 0:
-                skipped += 1
-                results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no match found"})
-            else:
+                    skipped += 1
+                    results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": "no block reference in Link field"})
                 skipped += 1
                 results.append({"title": exc["title"], "link_text": link_text, "status": "skipped", "reason": f"{len(matches)} matches — manual review required"})
 
@@ -756,79 +716,55 @@ def create_app() -> FastAPI:
 
     @app.post("/resolve/acknowledge/{note_id}")
     def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form(default="")):
-        notion_key = _wizard_state.get("notion_key", "")
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "")
         if not notion_key:
             return RedirectResponse(url="/resolve/", status_code=303)
-
         client = NotionClient(notion_key)
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
-        note_title = note_exceptions[0]["title"] if note_exceptions else ""
-
-        # 1. Delete callout marker(s) from the imported page
+        if not note_exceptions:
+            return RedirectResponse(url="/resolve/", status_code=303)
+        exc = note_exceptions[0]
+        exc_row_id = exc.get("note_id", "")
+        block_url = exc.get("block_url", "")
+        # Get block_id from Link field
+        if not block_id and "#" in block_url:
+            bid = block_url.split("#")[-1]
+            block_id = f"{bid[:8]}-{bid[8:12]}-{bid[12:16]}-{bid[16:20]}-{bid[20:]}" if len(bid) == 32 else bid
+        # Delete the block directly
         if block_id:
             client.delete_block(block_id)
-        elif note_title:
-            pages = [p for p in client.search_pages(note_title) if p.title == note_title]
-            if pages:
-                try:
-                    children = client.list_block_children(pages[0].page_id)
-                    for block in children:
-                        if block.get("type") == "callout":
-                            client.delete_block(block["id"])
-                except Exception:
-                    pass
-
-        # 2. Update Import-Exceptions row(s) to Status = "Resolved" with Link to resolved content
-        if note_title:
+        # Mark exception row Resolved
+        if exc_row_id:
             try:
-                # Build resolved link — points to the page (marker is deleted, page is clean)
-                resolved_url = ""
-                pages_found = [p for p in client.search_pages(note_title) if p.title == note_title]
-                if pages_found:
-                    resolved_url = pages_found[0].url or f"https://www.notion.so/{pages_found[0].page_id.replace('-', '')}"
-
-                all_matches = client.search_pages(note_title)
-                for p in all_matches:
-                    if p.title == note_title:
-                        try:
-                            update_props: dict = {"Status": {"select": {"name": "Resolved"}}}
-                            if resolved_url:
-                                update_props["Link"] = {"url": resolved_url}
-                            client._sdk_call(
-                                client._sdk_client.pages.update,
-                                page_id=p.page_id,
-                                properties=update_props,
-                            )
-                        except Exception:
-                            pass
+                client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}})
             except Exception:
                 pass
-
         return RedirectResponse(url="/resolve/", status_code=303)
-
     @app.post("/resolve/delete-block")
     def resolve_delete_block(request: Request, block_id: str = Form(default=""), note_id: str = Form(default="")):
-        notion_key = _wizard_state.get("notion_key", "")
-        if notion_key:
-            client = NotionClient(notion_key)
-            if block_id:
-                client.delete_block(block_id)
-            elif note_id:
-                # Look up by note_id — find the page and delete callout blocks
-                exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
-                note_exc = [e for e in exceptions if e["note_id"] == note_id]
-                note_title = note_exc[0]["title"] if note_exc else ""
-                if note_title:
-                    pages = [p for p in client.search_pages(note_title) if p.title == note_title]
-                    if pages:
-                        try:
-                            children = client.list_block_children(pages[0].page_id)
-                            for blk in children:
-                                if blk.get("type") == "callout":
-                                    client.delete_block(blk["id"])
-                        except Exception:
-                            pass
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "")
+        if not notion_key:
+            return RedirectResponse(url="/resolve/", status_code=303)
+        client = NotionClient(notion_key)
+        # Get block_id from exception Link field if not provided
+        if not block_id and note_id:
+            exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
+            note_exc = [e for e in exceptions if e["note_id"] == note_id]
+            if note_exc:
+                block_url = note_exc[0].get("block_url", "")
+                if "#" in block_url:
+                    bid = block_url.split("#")[-1]
+                    block_id = f"{bid[:8]}-{bid[8:12]}-{bid[12:16]}-{bid[16:20]}-{bid[20:]}" if len(bid) == 32 else bid
+        if block_id:
+            client.delete_block(block_id)
+        # Mark resolved
+        if note_id:
+            try:
+                client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}})
+            except Exception:
+                pass
+        return RedirectResponse(url="/resolve/", status_code=303)
         return RedirectResponse(url="/resolve/", status_code=303)
 
     @app.get("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
@@ -968,21 +904,17 @@ def create_app() -> FastAPI:
             notion_key = _wizard_state.get("notion_key", "")
             if notion_key:
                 try:
-                    resolve_client = NotionClient(notion_key)
                     exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
                     note_exc = [e for e in exceptions if e["note_id"] == note_id]
-                    note_title = note_exc[0]["title"] if note_exc else ""
-                    if note_title:
-                        pages_found = [p for p in resolve_client.search_pages(note_title) if p.title == note_title]
-                        if pages_found:
-                            page_id = pages_found[0].page_id
-                            children = resolve_client.list_block_children(page_id)
-                            for blk in children:
-                                if blk.get("type") == "callout":
-                                    block_text = "".join(rt.get("text", {}).get("content", "") for rt in blk.get("callout", {}).get("rich_text", []))
-                                    if "Encrypted" in block_text or "passphrase" in block_text:
-                                        block_id = blk["id"]
-                                        break
+                    if note_exc:
+                        block_url = note_exc[0].get("block_url", "")
+                        if "#" in block_url:
+                            page_id_raw = block_url.split("/")[-1].split("#")[0]
+                            block_id_raw = block_url.split("#")[-1]
+                            if len(page_id_raw) == 32:
+                                page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
+                            if len(block_id_raw) == 32:
+                                block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
                 except Exception:
                     pass
 
@@ -1075,22 +1007,19 @@ def create_app() -> FastAPI:
             from e2n.notion import paragraph_block, plain_text_span
             client = NotionClient(notion_key)
 
-            # If we don't have page_id/block_id from form, look them up
+            # If we don't have page_id/block_id from form, get from exception Link field
             if not page_id or not block_id:
                 exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
                 note_exc = [e for e in exceptions if e["note_id"] == note_id]
-                note_title = note_exc[0]["title"] if note_exc else ""
-                if note_title:
-                    pages_found = [p for p in client.search_pages(note_title) if p.title == note_title]
-                    if pages_found:
-                        page_id = pages_found[0].page_id
-                        children = client.list_block_children(page_id)
-                        for blk in children:
-                            if blk.get("type") == "callout":
-                                blk_text = "".join(rt.get("text", {}).get("content", "") for rt in blk.get("callout", {}).get("rich_text", []))
-                                if "Encrypted" in blk_text or "passphrase" in blk_text:
-                                    block_id = blk["id"]
-                                    break
+                if note_exc:
+                    block_url = note_exc[0].get("block_url", "")
+                    if "#" in block_url:
+                        page_id_raw = block_url.split("/")[-1].split("#")[0]
+                        block_id_raw = block_url.split("#")[-1]
+                        if len(page_id_raw) == 32:
+                            page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
+                        if len(block_id_raw) == 32:
+                            block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
 
             if page_id and block_id:
                 # Replace the callout with decrypted content (update block to paragraph)
@@ -1202,9 +1131,9 @@ def create_app() -> FastAPI:
                         continue
                     children = client.list_block_children(note_pages[0].page_id)
                     for block in children:
-                        if block.get("type") == "callout":
-                            block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", []))
-                            if page_name in block_text:
+                        if block.get("type") in ("callout", "paragraph", "quote", "heading_1", "heading_2", "heading_3"):
+                            block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get(block.get("type", ""), {}).get("rich_text", []))
+                            if page_name.lower() in block_text.lower():
                                 client.update_block_with_page_link(block["id"], page_name, target_url)
                                 resolved_this += 1
                                 total_resolved += 1
@@ -1253,61 +1182,55 @@ def create_app() -> FastAPI:
         referencing = [e for e in exceptions if "Evernote Link" in e["reasons"] and e.get("link_text", "").strip() == page_name]
         link_log.info("Found %d exceptions referencing '%s'", len(referencing), page_name)
 
-        # Step 3: For each referencing note, replace the callout with an inline link
+        # Step 3: Use Import-Exceptions Link field for direct block access
         resolved = 0
         failed = 0
         results: list[dict] = []
 
         for exc in referencing:
             note_title = exc["title"]
+            block_url = exc.get("block_url", "")
+            exc_row_id = exc.get("note_id", "")
+
+            # Extract block_id from Link URL
+            block_id = ""
+            if "#" in block_url:
+                block_id_raw = block_url.split("#")[-1]
+                if len(block_id_raw) == 32:
+                    block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
+                else:
+                    block_id = block_id_raw
+
+            # Fallback: scan page blocks
+            if not block_id:
+                try:
+                    note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                    if note_pages:
+                        children = client.list_block_children(note_pages[0].page_id)
+                        for block in children:
+                            btype = block.get("type", "")
+                            if btype in ("callout", "paragraph"):
+                                bt = "".join(rt.get("text", {}).get("content", "") for rt in block.get(btype, {}).get("rich_text", []))
+                                if page_name.lower() in bt.lower():
+                                    block_id = block["id"]
+                                    break
+                except Exception:
+                    pass
+
+            if not block_id:
+                failed += 1
+                results.append({"title": note_title, "status": "failed", "reason": "no block reference"})
+                continue
+
             try:
-                # Find the referencing note's page
-                note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
-                if not note_pages:
-                    failed += 1
-                    results.append({"title": note_title, "status": "failed", "reason": "page not found"})
-                    continue
-
-                note_page = note_pages[0]
-                # Find the callout block containing this link text
-                children = client.list_block_children(note_page.page_id)
-                replaced = False
-                for block in children:
-                    if block.get("type") == "callout":
-                        block_text = "".join(
-                            rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", [])
-                        )
-                        if page_name in block_text:
-                            # Replace callout with inline link
-                            client.update_block_with_page_link(block["id"], page_name, target_url)
-                            # Update exception row: Status=Resolved, Link=new block URL
-                            block_id_clean = block["id"].replace("-", "")
-                            page_id_clean = note_page.page_id.replace("-", "")
-                            new_link = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
-                            # Find and update exception row in Notion
-                            try:
-                                all_exc_matches = client.search_pages(note_title)
-                                for p in all_exc_matches:
-                                    if p.title == note_title:
-                                        try:
-                                            client._sdk_call(
-                                                client._sdk_client.pages.update,
-                                                page_id=p.page_id,
-                                                properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": new_link}},
-                                            )
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass
-                            replaced = True
-                            resolved += 1
-                            results.append({"title": note_title, "status": "resolved", "reason": f"→ linked to {page_name}"})
-                            break
-
-                if not replaced:
-                    failed += 1
-                    results.append({"title": note_title, "status": "failed", "reason": "callout block not found on page"})
-
+                client.update_block_with_page_link(block_id, page_name, target_url)
+                if exc_row_id:
+                    try:
+                        client._sdk_call(client._sdk_client.pages.update, page_id=exc_row_id, properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url or target_url}})
+                    except Exception:
+                        pass
+                resolved += 1
+                results.append({"title": note_title, "status": "resolved", "reason": f"-> {search_name}"})
             except Exception as exc_err:
                 failed += 1
                 results.append({"title": note_title, "status": "failed", "reason": str(exc_err)[:100]})
