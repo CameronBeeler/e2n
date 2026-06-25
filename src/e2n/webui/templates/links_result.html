@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n — Link Resolution: {{ page_name }}</title></head>
+<body>
+<h1>Link Resolution: {{ page_name }}</h1>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% else %}
+<p>Resolved: {{ resolved }} | Failed: {{ failed }}</p>
+<table>
+  <thead><tr><th>Referencing Page</th><th>Status</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for r in results %}
+    <tr>
+      <td>{{ r.title }}</td>
+      <td>{{ r.status }}</td>
+      <td>{{ r.reason }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<p><a href="/links/">← Back to Link Management</a> · <a href="/">Home</a></p>
+</body>
+</html>

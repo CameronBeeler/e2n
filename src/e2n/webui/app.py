@@ -676,7 +676,7 @@ def create_app() -> FastAPI:
     # --- Individual resolution actions ---
 
     @app.post("/resolve/acknowledge/{note_id}")
-    def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form("")):
+    def resolve_acknowledge(request: Request, note_id: str, block_id: str = Form(default="")):
         notion_key = _wizard_state.get("notion_key", "")
         if not notion_key:
             return RedirectResponse(url="/resolve/", status_code=303)
@@ -863,6 +863,10 @@ def create_app() -> FastAPI:
             decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
             decrypted_text = decrypted_bytes.decode("utf-8")
 
+            # Strip HTML tags — decrypted Evernote content is ENML/HTML
+            import re as _strip_re
+            decrypted_text = _strip_re.sub(r'<[^>]+>', '', decrypted_text).strip()
+
             # Look up the page and block_id for resolution actions
             page_id = ""
             block_id = ""
@@ -964,22 +968,394 @@ def create_app() -> FastAPI:
             padded = decryptor.update(ciphertext) + decryptor.finalize()
             unpadder = padding.PKCS7(128).unpadder()
             decrypted_text = (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+            # Strip HTML tags — decrypted Evernote content is ENML/HTML
+            import re as _strip_re2
+            decrypted_text = _strip_re2.sub(r'<[^>]+>', '', decrypted_text).strip()
         except Exception:
             return RedirectResponse(url=f"/resolve/decrypt/{note_id}", status_code=303)
 
-        # Insert decrypted content as paragraph block and delete marker
+        # Insert decrypted content as paragraph block, delete marker, mark resolved
         notion_key = _wizard_state.get("notion_key", "")
-        if notion_key and page_id:
+        if notion_key:
             from e2n.notion import paragraph_block, plain_text_span
             client = NotionClient(notion_key)
-            block = paragraph_block([plain_text_span(decrypted_text[:2000])])
-            client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
-            if block_id:
-                client.delete_block(block_id)
+
+            # If we don't have page_id/block_id from form, look them up
+            if not page_id or not block_id:
+                exceptions = _load_exceptions_from_processing()
+                note_exc = [e for e in exceptions if e["note_id"] == note_id]
+                note_title = note_exc[0]["title"] if note_exc else ""
+                if note_title:
+                    pages_found = [p for p in client.search_pages(note_title) if p.title == note_title]
+                    if pages_found:
+                        page_id = pages_found[0].page_id
+                        children = client.list_block_children(page_id)
+                        for blk in children:
+                            if blk.get("type") == "callout":
+                                blk_text = "".join(rt.get("text", {}).get("content", "") for rt in blk.get("callout", {}).get("rich_text", []))
+                                if "Encrypted" in blk_text or "passphrase" in blk_text:
+                                    block_id = blk["id"]
+                                    break
+
+            if page_id and block_id:
+                # Replace the callout with decrypted content (update block to paragraph)
+                try:
+                    client._sdk_call(
+                        client._sdk_client.blocks.update,
+                        block_id=block_id,
+                        paragraph={"rich_text": [{"type": "text", "text": {"content": decrypted_text[:2000]}}]},
+                    )
+                except Exception:
+                    # Fallback: append new block and delete old
+                    block = paragraph_block([plain_text_span(decrypted_text[:2000])])
+                    client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
+                    client.delete_block(block_id)
+
+                # Mark exception row as Resolved
+                page_id_clean = page_id.replace("-", "")
+                block_id_clean = block_id.replace("-", "")
+                resolved_url = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+                try:
+                    exceptions = _load_exceptions_from_processing()
+                    note_exc = [e for e in exceptions if e["note_id"] == note_id]
+                    note_title = note_exc[0]["title"] if note_exc else ""
+                    if note_title:
+                        all_matches = client.search_pages(note_title)
+                        for p in all_matches:
+                            if p.title == note_title:
+                                try:
+                                    client._sdk_call(
+                                        client._sdk_client.pages.update,
+                                        page_id=p.page_id,
+                                        properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": resolved_url}},
+                                    )
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
         return RedirectResponse(url="/resolve/", status_code=303)
 
+    # --- Evernote Link Management (first-class feature) ---
+
+    @app.get("/links/", response_class=HTMLResponse)
+    def links_home(request: Request):
+        """Show unique link targets and how many exceptions reference each."""
+        exceptions = _load_exceptions_from_processing()
+        link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
+        # Group by link_text (the target page name)
+        targets: dict[str, int] = {}
+        for exc in link_exceptions:
+            lt = exc.get("link_text", "").strip()
+            if lt:
+                targets[lt] = targets.get(lt, 0) + 1
+        # Sort by count desc, then alpha
+        sorted_targets = sorted(targets.items(), key=lambda x: (-x[1], x[0]))
+        return templates.TemplateResponse(
+            request=request,
+            name="links.html",
+            context={"targets": sorted_targets, "total_links": len(link_exceptions), "total_targets": len(targets)},
+        )
+
+    @app.post("/links/resolve-all", response_class=HTMLResponse)
+    def links_resolve_all(request: Request):
+        """Auto-resolve all link targets from most-referenced to least."""
+        import logging
+        link_log = logging.getLogger("e2n.webui.links")
+
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return templates.TemplateResponse(
+                request=request, name="links_result.html",
+                context={"error": "No Notion key configured.", "page_name": "ALL", "resolved": 0, "failed": 0, "results": []},
+            )
+
+        client = NotionClient(notion_key)
+        exceptions = _load_exceptions_from_processing()
+        link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
+
+        # Group by target and sort by count desc
+        targets: dict[str, list] = {}
+        for exc in link_exceptions:
+            lt = exc.get("link_text", "").strip()
+            if lt:
+                targets.setdefault(lt, []).append(exc)
+        sorted_targets = sorted(targets.items(), key=lambda x: -len(x[1]))
+
+        total_resolved = 0
+        total_failed = 0
+        results: list[dict] = []
+
+        for page_name, refs in sorted_targets:
+            # Find target page
+            target_matches = [p for p in client.search_pages(page_name) if p.title == page_name]
+            if not target_matches:
+                total_failed += len(refs)
+                results.append({"title": page_name, "status": "skipped", "reason": f"page not found ({len(refs)} refs)"})
+                continue
+
+            target_page = target_matches[0]
+            target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
+
+            resolved_this = 0
+            for exc in refs:
+                note_title = exc["title"]
+                try:
+                    note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                    if not note_pages:
+                        total_failed += 1
+                        continue
+                    children = client.list_block_children(note_pages[0].page_id)
+                    for block in children:
+                        if block.get("type") == "callout":
+                            block_text = "".join(rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", []))
+                            if page_name in block_text:
+                                client.update_block_with_page_link(block["id"], page_name, target_url)
+                                resolved_this += 1
+                                total_resolved += 1
+                                break
+                except Exception:
+                    total_failed += 1
+
+            results.append({"title": page_name, "status": "resolved" if resolved_this > 0 else "partial", "reason": f"resolved {resolved_this}/{len(refs)}"})
+            link_log.info("  %s: resolved %d/%d", page_name, resolved_this, len(refs))
+
+        link_log.info("Resolve-all complete: resolved=%d, failed=%d", total_resolved, total_failed)
+        return templates.TemplateResponse(
+            request=request, name="links_result.html",
+            context={"error": "", "page_name": "ALL LINKS", "resolved": total_resolved, "failed": total_failed, "results": results},
+        )
+
+    @app.post("/links/resolve", response_class=HTMLResponse)
+    def links_resolve(request: Request, page_name: str = Form(...), search_source: str = Form("Evernote Import"), override_target: str = Form("")):
+        """Resolve all Evernote Link exceptions that reference a given page name."""
+        import logging
+        link_log = logging.getLogger("e2n.webui.links")
+
+        notion_key = _wizard_state.get("notion_key", "")
+        if not notion_key:
+            return templates.TemplateResponse(
+                request=request, name="links_result.html",
+                context={"error": "No Notion key configured.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
+            )
+
+        client = NotionClient(notion_key)
+
+        # Step 1: Find the target page — use override if provided (for orphan links)
+        search_name = override_target.strip() if override_target.strip() else page_name
+        target_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
+        if not target_matches:
+            return templates.TemplateResponse(
+                request=request, name="links_result.html",
+                context={"error": f"Page '{search_name}' not found in Notion.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []},
+            )
+        target_page = target_matches[0]
+        target_url = target_page.url or f"https://www.notion.so/{target_page.page_id.replace('-', '')}"
+        link_log.info("Target page found: %s (%s)", page_name, target_page.page_id)
+
+        # Step 2: Find all exception records referencing this page name
+        exceptions = _load_exceptions_from_processing()
+        referencing = [e for e in exceptions if "Evernote Link" in e["reasons"] and e.get("link_text", "").strip() == page_name]
+        link_log.info("Found %d exceptions referencing '%s'", len(referencing), page_name)
+
+        # Step 3: For each referencing note, replace the callout with an inline link
+        resolved = 0
+        failed = 0
+        results: list[dict] = []
+
+        for exc in referencing:
+            note_title = exc["title"]
+            try:
+                # Find the referencing note's page
+                note_pages = [p for p in client.search_pages(note_title) if p.title == note_title]
+                if not note_pages:
+                    failed += 1
+                    results.append({"title": note_title, "status": "failed", "reason": "page not found"})
+                    continue
+
+                note_page = note_pages[0]
+                # Find the callout block containing this link text
+                children = client.list_block_children(note_page.page_id)
+                replaced = False
+                for block in children:
+                    if block.get("type") == "callout":
+                        block_text = "".join(
+                            rt.get("text", {}).get("content", "") for rt in block.get("callout", {}).get("rich_text", [])
+                        )
+                        if page_name in block_text:
+                            # Replace callout with inline link
+                            client.update_block_with_page_link(block["id"], page_name, target_url)
+                            # Update exception row: Status=Resolved, Link=new block URL
+                            block_id_clean = block["id"].replace("-", "")
+                            page_id_clean = note_page.page_id.replace("-", "")
+                            new_link = f"https://www.notion.so/{page_id_clean}#{block_id_clean}"
+                            # Find and update exception row in Notion
+                            try:
+                                all_exc_matches = client.search_pages(note_title)
+                                for p in all_exc_matches:
+                                    if p.title == note_title:
+                                        try:
+                                            client._sdk_call(
+                                                client._sdk_client.pages.update,
+                                                page_id=p.page_id,
+                                                properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": new_link}},
+                                            )
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                            replaced = True
+                            resolved += 1
+                            results.append({"title": note_title, "status": "resolved", "reason": f"→ linked to {page_name}"})
+                            break
+
+                if not replaced:
+                    failed += 1
+                    results.append({"title": note_title, "status": "failed", "reason": "callout block not found on page"})
+
+            except Exception as exc_err:
+                failed += 1
+                results.append({"title": note_title, "status": "failed", "reason": str(exc_err)[:100]})
+
+        link_log.info("Link resolution complete: resolved=%d, failed=%d", resolved, failed)
+        return templates.TemplateResponse(
+            request=request, name="links_result.html",
+            context={"error": "", "page_name": page_name, "resolved": resolved, "failed": failed, "results": results},
+        )
+
     # --- Trivial resolution routes ---
+
+    @app.get("/resolve/passwords", response_class=HTMLResponse)
+    def resolve_passwords(request: Request):
+        """List all encrypted exceptions for batch password management."""
+        exceptions = _load_exceptions_from_processing()
+        encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
+        return templates.TemplateResponse(
+            request=request,
+            name="resolve_passwords.html",
+            context={"exceptions": encrypted, "total": len(encrypted)},
+        )
+
+    @app.get("/passwords/", response_class=HTMLResponse)
+    def passwords_home(request: Request):
+        """First-class password management — lists all encrypted items from Import-Exceptions."""
+        exceptions = _load_exceptions_from_processing()
+        encrypted = [e for e in exceptions if "Encrypted" in e["reasons"] or "Encrypted" in e.get("error_message", "")]
+        return templates.TemplateResponse(
+            request=request,
+            name="passwords.html",
+            context={"exceptions": encrypted, "total": len(encrypted)},
+        )
+
+    @app.get("/passwords/decrypt/{note_id}", response_class=HTMLResponse)
+    def passwords_decrypt(request: Request, note_id: str):
+        """Decrypt a single password — opens in new tab for easy copy."""
+        # Reuse the existing decrypt view logic
+        exceptions = _load_exceptions_from_processing()
+        note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
+        hint = ""
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    hint = crypt_el.attrib.get("hint", "")
+                                    break
+                        except Exception:
+                            pass
+                    break
+        title = note_exceptions[0]["title"] if note_exceptions else note_id
+        return templates.TemplateResponse(
+            request=request,
+            name="passwords_decrypt.html",
+            context={"note_id": note_id, "hint": hint, "title": title},
+        )
+
+    @app.post("/passwords/decrypt/{note_id}", response_class=HTMLResponse)
+    def passwords_decrypt_post(request: Request, note_id: str, passphrase: str = Form(...)):
+        """Decrypt and show password content in a minimal view for copying."""
+        import base64 as _b64
+        proc_dir = Path(_wizard_state.get("processing_directory", "")).expanduser().resolve()
+        encrypted_b64 = ""
+        key_length = 128
+
+        if proc_dir.exists():
+            for child in proc_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                note_file = child / "notes" / f"{note_id}.enex"
+                if note_file.exists():
+                    from lxml import etree as _etree
+                    tree = _etree.parse(str(note_file), parser=_etree.XMLParser(recover=True))
+                    root = tree.getroot()
+                    note_el = root.find("note") if root.tag != "note" else root
+                    content_el = note_el.find("content") if note_el is not None else None
+                    content_text = content_el.text or "" if content_el is not None else ""
+                    if content_text:
+                        try:
+                            enml_root = _etree.fromstring(content_text.encode("utf-8"), parser=_etree.XMLParser(recover=True))
+                            for crypt_el in enml_root.iter():
+                                if crypt_el.tag == "en-crypt" or (crypt_el.tag and crypt_el.tag.endswith("en-crypt")):
+                                    length_str = crypt_el.attrib.get("length", "128")
+                                    key_length = int(length_str) if length_str.isdigit() else 128
+                                    encrypted_b64 = (crypt_el.text or "").strip()
+                                    break
+                        except Exception:
+                            pass
+                    break
+
+        if not encrypted_b64:
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "No encrypted content found.", "decrypted": "", "title": note_id})
+
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives import padding, hashes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            import hmac as _hmac
+
+            raw = _b64.b64decode(encrypted_b64)
+            salt = raw[4:20]
+            salthmac = raw[20:36]
+            iv = raw[36:52]
+            ciphertext = raw[52:-32]
+            stored_hmac = raw[-32:]
+            body = raw[0:-32]
+
+            kdf_hmac = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salthmac, iterations=50000)
+            key_hmac = kdf_hmac.derive(passphrase.encode("utf-8"))
+            computed_hmac = _hmac.new(key_hmac, body, "sha256").digest()
+            if not _hmac.compare_digest(computed_hmac, stored_hmac):
+                return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "Wrong passphrase.", "decrypted": "", "title": note_id})
+
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=key_length // 8, salt=salt, iterations=50000)
+            key = kdf.derive(passphrase.encode("utf-8"))
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            padded = decryptor.update(ciphertext) + decryptor.finalize()
+            unpadder = padding.PKCS7(128).unpadder()
+            decrypted_text = (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+            import re as _strip_re3
+            decrypted_text = _strip_re3.sub(r'<[^>]+>', '', decrypted_text).strip()
+
+            exceptions = _load_exceptions_from_processing()
+            note_exc = [e for e in exceptions if e["note_id"] == note_id]
+            title = note_exc[0]["title"] if note_exc else note_id
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "", "decrypted": decrypted_text, "title": title})
+        except Exception as exc:
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": f"Decryption failed: {exc}", "decrypted": "", "title": note_id})
 
     @app.post("/resolve/delete-empty-pages")
     def resolve_delete_empty_pages(request: Request):

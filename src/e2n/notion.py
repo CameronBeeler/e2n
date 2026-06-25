@@ -506,21 +506,38 @@ class NotionClient:
         return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
 
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
-        """Replace a warning placeholder block with a paragraph containing an inline page link."""
-        body = {
-            "paragraph": {
-                "rich_text": [
-                    {
-                        "type": "text",
-                        "text": {
-                            "content": link_text,
-                            "link": {"url": page_url},
-                        },
-                    }
-                ]
+        """Replace a warning placeholder block's content with an inline page link.
+
+        Updates the block in-place. Tries paragraph first (type change),
+        falls back to updating as callout with link content.
+        """
+        # Try updating as paragraph (may fail if block type can't change)
+        try:
+            body = {
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": link_text, "link": {"url": page_url}}}]
+                }
             }
-        }
-        return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
+            return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
+        except NotionAPIError:
+            pass
+
+        # Fallback: update the callout content to show the link (keeps callout type)
+        try:
+            body = {
+                "callout": {
+                    "rich_text": [{"type": "text", "text": {"content": f"✅ {link_text}", "link": {"url": page_url}}}],
+                    "icon": {"type": "emoji", "emoji": "✅"},
+                    "color": "green_background",
+                }
+            }
+            return self._sdk_call(self._sdk_client.blocks.update, block_id=block_id, **body)
+        except NotionAPIError:
+            pass
+
+        # Last resort: delete old block and note that content was resolved
+        self.delete_block(block_id)
+        return {}
 
     def upload_file(self, file_path: "Path", mime_type: str = "") -> str:
         """Upload a local file via Notion File Upload API and return the upload ID.

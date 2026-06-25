@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head><title>e2n — Evernote Link Management</title></head>
+<body>
+<h1>Evernote Link Management</h1>
+<p>{{ total_links }} unresolved link(s) referencing {{ total_targets }} unique page(s).</p>
+
+{% if total_targets == 0 %}
+<p>No Evernote links to resolve!</p>
+{% else %}
+<h2>Auto-Resolve All</h2>
+<p>Process all link targets from most-referenced to least. Only resolves where an exact page match exists.</p>
+<form method="post" action="/links/resolve-all" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving all, please wait...';">
+  <button type="submit">Auto-Resolve All Links →</button>
+</form>
+
+<h2>Resolve by Target Page</h2>
+<p>Select a page name to batch-resolve all references to it. For orphan links (no matching page), use manual override.</p>
+<table>
+  <thead><tr><th>Target Page Name</th><th>References</th><th>Action</th><th>Manual Override</th></tr></thead>
+  <tbody>
+  {% for name, count in targets %}
+    <tr>
+      <td>{{ name }}</td>
+      <td>{{ count }}</td>
+      <td>
+        <form method="post" action="/links/resolve" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving...';">
+          <input type="hidden" name="page_name" value="{{ name }}">
+          <input type="hidden" name="search_source" value="Evernote Import">
+          <button type="submit">Resolve {{ count }} →</button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/links/resolve" style="display:inline">
+          <input type="hidden" name="page_name" value="{{ name }}">
+          <input type="text" name="override_target" placeholder="Actual page name" size="20">
+          <button type="submit">Link to →</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<p><a href="/">← Home</a></p>
+</body>
+</html>
