@@ -400,6 +400,48 @@ def create_app() -> FastAPI:
                 finally:
                     store.close()
 
+                # Create Notion rows for extraction-time exceptions (Empty Title, No Content)
+                # These are in exceptions.txt from extraction but don't get import-time rows
+                exc_file = output_dir / "exceptions.txt"
+                if exc_file.exists():
+                    from e2n.notion import create_exception_row as _create_ext_exc
+                    import_time_notes: set[str] = set()  # notes that already got exception rows during import
+                    for line in exc_file.read_text(encoding="utf-8").strip().splitlines():
+                        parts = line.split("\t")
+                        if len(parts) < 3:
+                            continue
+                        exc_note_id = parts[0]
+                        exc_title = parts[1]
+                        exc_reasons = parts[2]
+                        # Skip if this is an import-time exception (Evernote Link, Unsupported, Encrypted)
+                        # — those already have Notion rows from the import loop above
+                        if "Evernote Link" in exc_reasons or "Unsupported Content" in exc_reasons or "Encrypted" in exc_reasons:
+                            continue
+                        # This is an extraction-time-only exception (Empty Title, No Content)
+                        dedup_key = f"{exc_note_id}:{exc_reasons}"
+                        if dedup_key in import_time_notes:
+                            continue
+                        import_time_notes.add(dedup_key)
+                        # Find the page URL for this note
+                        page_url = ""
+                        try:
+                            found = [p for p in client.search_pages(exc_title) if p.title == exc_title]
+                            if found:
+                                page_url = found[0].url or f"https://www.notion.so/{found[0].page_id.replace('-', '')}"
+                        except Exception:
+                            pass
+                        try:
+                            _create_ext_exc(
+                                client,
+                                exception_database_id=exc_db.database_id,
+                                note_name=exc_title,
+                                reasons=tuple(r.strip() for r in exc_reasons.split(",")),
+                                source_file=src.name,
+                                page_url=page_url,
+                            )
+                        except Exception as ext_err:
+                            log.warning("Could not create extraction exception row for %s: %s", exc_title, ext_err)
+
             log.info("Import complete: %d notes imported", imported_count)
             _wizard_state["step4_complete"] = "true"
             return RedirectResponse(url="/wizard/step/5", status_code=303)
@@ -486,7 +528,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="resolve_dashboard.html",
-            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: x[1]["count"], reverse=True)), "total": len(exceptions)},
+            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: (-x[1]["count"], x[1]["title"]))), "total": len(exceptions)},
         )
 
     @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
@@ -821,10 +863,34 @@ def create_app() -> FastAPI:
             decrypted_bytes = unpadder.update(padded) + unpadder.finalize()
             decrypted_text = decrypted_bytes.decode("utf-8")
 
+            # Look up the page and block_id for resolution actions
+            page_id = ""
+            block_id = ""
+            notion_key = _wizard_state.get("notion_key", "")
+            if notion_key:
+                try:
+                    resolve_client = NotionClient(notion_key)
+                    exceptions = _load_exceptions_from_processing()
+                    note_exc = [e for e in exceptions if e["note_id"] == note_id]
+                    note_title = note_exc[0]["title"] if note_exc else ""
+                    if note_title:
+                        pages_found = [p for p in resolve_client.search_pages(note_title) if p.title == note_title]
+                        if pages_found:
+                            page_id = pages_found[0].page_id
+                            children = resolve_client.list_block_children(page_id)
+                            for blk in children:
+                                if blk.get("type") == "callout":
+                                    block_text = "".join(rt.get("text", {}).get("content", "") for rt in blk.get("callout", {}).get("rich_text", []))
+                                    if "Encrypted" in block_text or "passphrase" in block_text:
+                                        block_id = blk["id"]
+                                        break
+                except Exception:
+                    pass
+
             return templates.TemplateResponse(
                 request=request,
                 name="resolve_decrypt_result.html",
-                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text},
+                context={"note_id": note_id, "hint": hint, "error": "", "decrypted": decrypted_text, "passphrase": passphrase, "page_id": page_id, "block_id": block_id},
             )
         except Exception as exc:
             error_msg = str(exc)
