@@ -3,6 +3,10 @@
 <head><title>e2n — Evernote Link Management</title></head>
 <body>
 <h1>Evernote Link Management</h1>
+<form method="post" action="/refresh" style="display:inline;" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Refreshing...';">
+  <input type="hidden" name="redirect" value="/links/">
+  <button type="submit">&#x21bb; Refresh</button>
+</form>
 <p>{{ total_links }} unresolved link(s) referencing {{ total_targets }} unique page(s).</p>
 
 {% if total_targets == 0 %}
@@ -41,7 +45,7 @@
         </form>
       </td>
       <td style="padding-left:2em;">
-        <form method="post" action="/links/resolve" style="display:inline">
+        <form method="post" action="/links/resolve" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Linking...';">
           <input type="hidden" name="page_name" value="{{ name }}">
           <input type="text" name="override_target" placeholder="Actual page name" size="20">
           <button type="submit">Link to →</button>

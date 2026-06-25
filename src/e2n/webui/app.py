@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,9 @@ def create_app() -> FastAPI:
         notion_root: str = Form(""),
         resume: str | None = Form(None),
     ) -> RedirectResponse:
+        _wizard_state.setdefault("notion_key", notion_key.strip())
+        if notion_root.strip():
+            _wizard_state.setdefault("notion_root", notion_root.strip())
         try:
             args = _build_notion_import_args(
                 enex_source=enex_source,
@@ -131,6 +135,39 @@ def create_app() -> FastAPI:
     # In-memory wizard state (per-process; sufficient for single-user local tool)
     _wizard_state: dict[str, str] = {}
 
+    # Persist/load wizard config so pages work across restarts without re-running wizard
+    _CONFIG_PATH = Path("~/.e2n/config.json").expanduser()
+
+    def _save_wizard_config():
+        """Save notion credentials to disk for persistence across restarts."""
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        import json as _j
+        data = {k: v for k, v in _wizard_state.items() if k in ("notion_key", "notion_root", "enex_source", "processing_directory")}
+        _CONFIG_PATH.write_text(_j.dumps(data), encoding="utf-8")
+
+    def _load_wizard_config():
+        """Load saved config into wizard state."""
+        if _CONFIG_PATH.exists():
+            import json as _j
+            try:
+                data = _j.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+                for k, v in data.items():
+                    _wizard_state.setdefault(k, v)
+            except Exception:
+                pass
+
+    # Seed from persisted config, then override with env vars
+    _load_wizard_config()
+    if os.environ.get("NOTION_KEY") or os.environ.get("NOTION_TOKEN"):
+        _wizard_state["notion_key"] = os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+    if os.environ.get("NOTION_ROOT"):
+        _wizard_state["notion_root"] = os.environ.get("NOTION_ROOT", "")
+    # Ensure env vars are set from persisted config for session lifetime
+    if _wizard_state.get("notion_key") and not os.environ.get("NOTION_KEY"):
+        os.environ["NOTION_KEY"] = _wizard_state["notion_key"]
+    if _wizard_state.get("notion_root") and not os.environ.get("NOTION_ROOT"):
+        os.environ["NOTION_ROOT"] = _wizard_state["notion_root"]
+
     @app.get("/wizard/", response_class=HTMLResponse)
     def wizard_root(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(
@@ -158,6 +195,7 @@ def create_app() -> FastAPI:
         _wizard_state["enex_source"] = str(source_path)
         _wizard_state["processing_directory"] = str(proc_path)
         _wizard_state["step1_complete"] = "true"
+        _save_wizard_config()
         return RedirectResponse(url="/wizard/step/2", status_code=303)
 
     @app.get("/wizard/step/2", response_class=HTMLResponse)
@@ -195,6 +233,9 @@ def create_app() -> FastAPI:
             _wizard_state["notion_key"] = notion_key.strip()
             _wizard_state["notion_root"] = notion_root.strip()
             _wizard_state["step2_complete"] = "true"
+            os.environ["NOTION_KEY"] = notion_key.strip()
+            os.environ["NOTION_ROOT"] = notion_root.strip()
+            _save_wizard_config()
             return RedirectResponse(url="/wizard/step/3", status_code=303)
         except Exception as exc:
             error_msg = str(exc)
@@ -580,41 +621,52 @@ def create_app() -> FastAPI:
                 exc_db = ensure_exception_database(client, bootstrap_result.exceptions.page_id)
                 _cache["exc_db_id"] = exc_db.database_id
             exc_db_id = _cache["exc_db_id"]
-            # Query all rows from the exception database
-            results = client._api(f"databases/{exc_db_id}/query", "POST", {})
+            # Query all rows from the exception database (paginated)
             exceptions: list[dict] = []
-            for page in results.get("results", []):
-                props = page.get("properties", {})
-                title_items = props.get("Note Name", {}).get("title", [])
-                title = "".join(t.get("text", {}).get("content", "") for t in title_items)
-                reason_items = props.get("Reason", {}).get("multi_select", [])
-                reasons = ",".join(r.get("name", "") for r in reason_items)
-                status_obj = props.get("Status", {}).get("select")
-                status = status_obj.get("name", "") if status_obj else ""
-                error_items = props.get("Error Message", {}).get("rich_text", [])
-                error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
-                link_items = props.get("Linkable Text", {}).get("rich_text", [])
-                link_text = "".join(t.get("text", {}).get("content", "") for t in link_items)
-                link_url = props.get("Link", {}).get("url", "")
+            body: dict = {}
+            while True:
+                results = client._api(f"databases/{exc_db_id}/query", "POST", body)
+                for page in results.get("results", []):
+                    props = page.get("properties", {})
+                    title_items = props.get("Note Name", {}).get("title", [])
+                    title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+                    reason_items = props.get("Reason", {}).get("multi_select", [])
+                    reasons = ",".join(r.get("name", "") for r in reason_items)
+                    status_obj = props.get("Status", {}).get("select")
+                    status = status_obj.get("name", "") if status_obj else ""
+                    error_items = props.get("Error Message", {}).get("rich_text", [])
+                    error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
+                    link_items = props.get("Linkable Text", {}).get("rich_text", [])
+                    link_text = "".join(t.get("text", {}).get("content", "") for t in link_items)
+                    link_url = props.get("Link", {}).get("url", "")
 
-                # Only include Open exceptions
-                if status == "Resolved":
-                    continue
+                    # Only include Open exceptions
+                    if status == "Resolved":
+                        continue
 
-                exceptions.append({
-                    "note_id": page["id"],
-                    "title": title,
-                    "reasons": reasons,
-                    "error_message": error_msg,
-                    "link_text": link_text,
-                    "link_value": "",
-                    "block_url": link_url,
-                    "status": status,
-                })
+                    exceptions.append({
+                        "note_id": page["id"],
+                        "title": title,
+                        "reasons": reasons,
+                        "error_message": error_msg,
+                        "link_text": link_text,
+                        "link_value": "",
+                        "block_url": link_url,
+                        "status": status,
+                    })
+                if not results.get("has_more"):
+                    break
+                body = {"start_cursor": results["next_cursor"]}
             _cache["notion_exceptions"] = exceptions
             return exceptions
         except Exception:
             return []
+
+    @app.post("/refresh")
+    def refresh_page(request: Request, redirect: str = Form("/")):
+        """Invalidate exceptions cache and redirect back to the calling page."""
+        _invalidate_exceptions_cache()
+        return RedirectResponse(url=redirect, status_code=303)
 
     @app.get("/resolve/", response_class=HTMLResponse)
     def resolve_dashboard(request: Request):
@@ -1351,23 +1403,29 @@ def create_app() -> FastAPI:
                     exc_db = ensure_exception_database(client, br.exceptions.page_id)
                     exc_db_id = exc_db.database_id
                     _cache["exc_db_id"] = exc_db_id
-                results = client._api(f"databases/{exc_db_id}/query", "POST", {})
-                for page in results.get("results", []):
-                    props = page.get("properties", {})
-                    title_items = props.get("Note Name", {}).get("title", [])
-                    title = "".join(t.get("text", {}).get("content", "") for t in title_items)
-                    reason_items = props.get("Reason", {}).get("multi_select", [])
-                    reasons = ",".join(r.get("name", "") for r in reason_items)
-                    status_obj = props.get("Status", {}).get("select")
-                    status = status_obj.get("name", "") if status_obj else "Open"
-                    error_items = props.get("Error Message", {}).get("rich_text", [])
-                    error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
-                    all_exceptions.append({
-                        "note_id": page["id"], "title": title, "reasons": reasons,
-                        "error_message": error_msg, "status": status,
-                    })
-            except Exception:
-                pass
+                # Paginate to fetch ALL rows (including resolved)
+                body: dict = {}
+                while True:
+                    results = client._api(f"databases/{exc_db_id}/query", "POST", body)
+                    for page in results.get("results", []):
+                        props = page.get("properties", {})
+                        title_items = props.get("Note Name", {}).get("title", [])
+                        title = "".join(t.get("text", {}).get("content", "") for t in title_items)
+                        reason_items = props.get("Reason", {}).get("multi_select", [])
+                        reasons = ",".join(r.get("name", "") for r in reason_items)
+                        status_obj = props.get("Status", {}).get("select")
+                        status = status_obj.get("name", "") if status_obj else "Open"
+                        error_items = props.get("Error Message", {}).get("rich_text", [])
+                        error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
+                        all_exceptions.append({
+                            "note_id": page["id"], "title": title, "reasons": reasons,
+                            "error_message": error_msg, "status": status,
+                        })
+                    if not results.get("has_more"):
+                        break
+                    body = {"start_cursor": results["next_cursor"]}
+            except Exception as exc:
+                logging.getLogger("e2n.webui").warning("Password page: failed to load exceptions from Notion: %s", exc)
         if not all_exceptions:
             all_exceptions = _load_exceptions_from_processing()
         encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") or "encrypted" in e.get("error_message", "").lower() or "passphrase" in e.get("error_message", "").lower()]
