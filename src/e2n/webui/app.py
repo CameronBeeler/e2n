@@ -660,9 +660,9 @@ def create_app() -> FastAPI:
         notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
         try:
             br = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
-            # Search for databases under the converted (import) page
-            all_dbs = client.search_databases()
-            import_dbs = {db.database_id for db in all_dbs if db.parent_page_id == br.converted.page_id}
+            # List children of the import page to find databases
+            children = client.list_block_children(br.converted.page_id)
+            import_dbs = {c["id"] for c in children if c.get("type") == "child_database"}
             _cache["import_db_ids"] = list(import_dbs)
             return import_dbs
         except Exception:
@@ -1318,8 +1318,11 @@ def create_app() -> FastAPI:
         )
 
 
+
     def _check_link_targets_background(names: list[str]):
         """Background thread: bulk-load import DB titles, then match locally."""
+        import logging
+        _log = logging.getLogger("e2n.webui.links")
         _link_targets_checking[0] = True
         notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
         if not notion_key:
@@ -1328,16 +1331,24 @@ def create_app() -> FastAPI:
         try:
             client = NotionClient(notion_key)
             import_dbs = _get_import_db_ids(client, notion_key)
-            import_dbs = _get_import_db_ids(client, notion_key)
+            _log.info("Link check: found %d import database(s)", len(import_dbs))
+            if not import_dbs:
+                _log.warning("No import databases found — all targets will show as missing")
             # Bulk-load all page titles + IDs from import databases
-            import_titles: dict[str, dict] = {}  # {title: {page_id, url}}
+            import_titles: dict[str, dict] = {}
             for db_id in import_dbs:
                 body: dict = {}
                 while True:
                     results = client._api(f"databases/{db_id}/query", "POST", body)
                     for page in results.get("results", []):
                         props = page.get("properties", {})
-                        title_items = props.get("Name", {}).get("title", []) or props.get("title", {}).get("title", [])
+                        # Try "Name" first (import DB), then scan for any title property
+                        title_items = props.get("Name", {}).get("title", [])
+                        if not title_items:
+                            for v in props.values():
+                                if isinstance(v, dict) and v.get("type") == "title":
+                                    title_items = v.get("title", [])
+                                    break
                         title = "".join(t.get("text", {}).get("content", "") for t in title_items)
                         if title and title not in import_titles:
                             pid = page["id"]
@@ -1346,6 +1357,7 @@ def create_app() -> FastAPI:
                     if not results.get("has_more"):
                         break
                     body = {"start_cursor": results["next_cursor"]}
+            _log.info("Link check: loaded %d page titles from import DBs", len(import_titles))
             # Match names and cache page references
             for name in names:
                 if name in import_titles:
@@ -1353,11 +1365,14 @@ def create_app() -> FastAPI:
                     _link_target_pages[name] = import_titles[name]
                 else:
                     _link_targets_status[name] = "missing"
+        except Exception as exc:
+            _log.warning("Link check failed: %s", exc)
             for name in names:
                 if _link_targets_status.get(name) == "pending":
                     _link_targets_status[name] = "missing"
         finally:
             _link_targets_checking[0] = False
+
 
 
     @app.get("/links/status")

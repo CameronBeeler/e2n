@@ -26,7 +26,7 @@
 <h2>Auto-Resolve All</h2>
 <p>Process all link targets from most-referenced to least. Only resolves where an exact page match exists in the import databases.</p>
 <form method="post" action="/links/resolve-all" class="resolve-form" onsubmit="var b=this.querySelector('button');b.disabled=true;b.style.background='#999';b.textContent='Resolving all...';document.getElementById('resolve-progress').style.display='block';document.getElementById('resolve-progress').textContent='⚙️ Resolving all links, please wait...';">
-  <button type="submit">Auto-Resolve All Links →</button>
+  <button type="submit" {% if checking or pending_targets %}disabled style="background:#999;color:#fff;cursor:not-allowed;opacity:0.6;"{% endif %}>Auto-Resolve All Links →</button>
 </form>
 
 {% if checking %}
