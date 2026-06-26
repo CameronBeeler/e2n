@@ -936,7 +936,11 @@ def create_exception_row(
             # Fallback: create with just the title (schema may not be set up)
             fallback_body: JsonObject = {
                 "parent": {"database_id": exception_database_id},
-                "properties": {"title": {"title": [{"text": {"content": note_name}}]}},
+                "properties": {
+                    "Note Name": {"title": [{"text": {"content": note_name}}]},
+                    EXCEPTION_REASON_PROPERTY: exception_reason_property(reasons),
+                    EXCEPTION_STATUS_PROPERTY: {"select": {"name": "Open"}},
+                },
             }
             try:
                 response = client._api("pages", "POST", fallback_body)

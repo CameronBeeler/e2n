@@ -734,7 +734,11 @@ def create_app() -> FastAPI:
 
     @app.get("/resolve/", response_class=HTMLResponse)
     def resolve_dashboard(request: Request):
-        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
+        exceptions = _cache.get("notion_exceptions") or []
+        # If cache empty, kick off background fetch
+        if _cache.get("notion_exceptions") is None:
+            import threading
+            threading.Thread(target=_load_exceptions_from_notion, daemon=True).start()
         # Group by reason category
         categories: dict[str, int] = {}
         for exc in exceptions:
@@ -752,7 +756,7 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="resolve_dashboard.html",
-            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: (-x[1]["count"], x[1]["title"]))), "total": len(exceptions)},
+            context={"categories": categories, "pages": dict(sorted(pages.items(), key=lambda x: (-x[1]["count"], x[1]["title"]))), "total": len(exceptions), "loading": _cache.get("notion_exceptions") is None},
         )
 
     @app.get("/resolve/type/{reason_slug}", response_class=HTMLResponse)
@@ -1518,56 +1522,18 @@ def create_app() -> FastAPI:
 
     @app.get("/passwords/", response_class=HTMLResponse)
     def passwords_home(request: Request):
-        """First-class password management — lists all encrypted items from Import-Exceptions."""
-        # Load ALL exceptions (including resolved) for password audit view
-        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
-        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
-        all_exceptions: list[dict] = []
-        if notion_key and notion_root:
-            try:
-                client = NotionClient(notion_key)
-                exc_db_id = _cache.get("exc_db_id")
-                if not exc_db_id:
-                    br = bootstrap_notion_pages(notion_key, root_title=notion_root)
-                    exc_db = ensure_exception_database(client, br.exceptions.page_id)
-                    exc_db_id = exc_db.database_id
-                    _cache["exc_db_id"] = exc_db_id
-                # Query with filter: Reason contains "Encrypted" AND Status != "Resolved"
-                query_filter = {
-                    "and": [
-                        {"property": "Reason", "multi_select": {"contains": "Encrypted"}},
-                        {"property": "Status", "select": {"does_not_equal": "Resolved"}},
-                    ]
-                }
-                body: dict = {"filter": query_filter}
-                while True:
-                    results = client._api(f"databases/{exc_db_id}/query", "POST", body)
-                    for page in results.get("results", []):
-                        props = page.get("properties", {})
-                        title_items = props.get("Note Name", {}).get("title", [])
-                        title = "".join(t.get("text", {}).get("content", "") for t in title_items)
-                        reason_items = props.get("Reason", {}).get("multi_select", [])
-                        reasons = ",".join(r.get("name", "") for r in reason_items)
-                        status_obj = props.get("Status", {}).get("select")
-                        status = status_obj.get("name", "") if status_obj else "Open"
-                        error_items = props.get("Error Message", {}).get("rich_text", [])
-                        error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items)
-                        all_exceptions.append({
-                            "note_id": page["id"], "title": title, "reasons": reasons,
-                            "error_message": error_msg, "status": status,
-                        })
-                    if not results.get("has_more"):
-                        break
-                    body = {"filter": query_filter, "start_cursor": results["next_cursor"]}
-            except Exception as exc:
-                logging.getLogger("e2n.webui").warning("Password page: failed to load exceptions from Notion: %s", exc)
-        if not all_exceptions:
-            all_exceptions = _load_exceptions_from_processing()
-        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") and e.get("status", "Open") != "Resolved"]
+        """First-class password management — non-blocking, loads from cache or background."""
+        loading = _cache.get("notion_exceptions") is None
+        exceptions = _cache.get("notion_exceptions") or []
+        # Kick off background fetch if cache empty
+        if loading:
+            import threading
+            threading.Thread(target=_load_exceptions_from_notion, daemon=True).start()
+        encrypted = [e for e in exceptions if "Encrypted" in e.get("reasons", "") and e.get("status", "Open") != "Resolved"]
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
-            context={"exceptions": encrypted, "total": len(encrypted)},
+            context={"exceptions": encrypted, "total": len(encrypted), "loading": loading},
         )
 
     @app.get("/passwords/decrypt/{note_id}", response_class=HTMLResponse)

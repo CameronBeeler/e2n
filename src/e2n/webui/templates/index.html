@@ -30,7 +30,7 @@
 
       <form method="post" action="/config" id="config-form">
         <div class="config-bar">
-          <div><label>Notion Integration Key</label><input type="password" name="notion_key" value="{{ notion_key }}" placeholder="ntn_..."></div>
+          <div><label>Notion Integration Key</label><div style="display:flex;gap:0.3em;"><input type="password" id="notion-key-input" name="notion_key" value="{{ notion_key }}" placeholder="ntn_..." style="flex:1;"><button type="button" onclick="var i=document.getElementById('notion-key-input');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'👁':'🙈';" style="background:none;border:1px solid #ccc;border-radius:4px;cursor:pointer;font-size:1.1em;padding:0 0.4em;">👁</button></div></div>
           <div><label>Notion Root Page</label><input type="text" name="notion_root" value="{{ notion_root }}" placeholder="Page name shared with integration"></div>
           <div><label>ENEX Source (file or directory)</label><input type="text" name="enex_source" value="{{ enex_source }}" placeholder="~/exports/evernote.enex"></div>
           <div><label>Processing Directory</label><input type="text" name="processing_directory" value="{{ processing_directory }}" placeholder="~/e2n-processing"></div>
