@@ -1,6 +1,15 @@
 <!DOCTYPE html>
 <html>
-<head><title>e2n — Evernote Link Management</title></head>
+<head><title>e2n — Evernote Link Management</title>
+<style>
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { padding: 0.6em 1.2em; text-align: left; border-bottom: 1px solid #ddd; }
+  th { background: #f5f5f5; }
+  .section-desc { font-size: 0.9em; color: #555; margin: 0.3em 0 1em 0; }
+  form.resolve-form button { transition: all 0.2s; }
+  form.resolve-form button:disabled { background: #999; color: #fff; cursor: not-allowed; opacity: 0.7; }
+</style>
+</head>
 <body>
 <h1>Evernote Link Management</h1>
 <form method="post" action="/refresh" style="display:inline;" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Refreshing...';">
@@ -14,18 +23,19 @@
 {% else %}
 <h2>Auto-Resolve All</h2>
 <p>Process all link targets from most-referenced to least. Only resolves where an exact page match exists in the import databases.</p>
-<form method="post" action="/links/resolve-all" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving all, please wait...';">
+<form method="post" action="/links/resolve-all" class="resolve-form" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Resolving all, please wait...';">
   <button type="submit">Auto-Resolve All Links →</button>
 </form>
 
 {% if exists_targets %}
 <h2>Link Page Exists</h2>
+<p class="section-desc">These Evernote link targets match an existing Import database record by name.</p>
 <table>
   <thead>
     <tr>
-      <th>Link Target</th>
-      <th>Import Page</th>
-      <th>Link Count</th>
+      <th>Targeted Link Page</th>
+      <th>Source Page</th>
+      <th>Page Link Count</th>
       <th>Resolve</th>
     </tr>
   </thead>
@@ -33,10 +43,10 @@
   {% for name, info in exists_targets %}
     <tr>
       <td>{{ name }}</td>
-      <td>{{ name }}</td>
+      <td>{% if info.sources|length == 1 %}{{ info.sources[0] }}{% elif info.sources|length <= 3 %}{{ info.sources|join(', ') }}{% else %}{{ info.sources|length }} pages{% endif %}</td>
       <td>{{ info.count }}</td>
       <td>
-        <form method="post" action="/links/resolve" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Resolving...';">
+        <form method="post" action="/links/resolve" class="resolve-form" style="display:inline" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Resolving...';">
           <input type="hidden" name="page_name" value="{{ name }}">
           <button type="submit">Resolve {{ info.count }} →</button>
         </form>
@@ -49,13 +59,14 @@
 
 {% if missing_targets %}
 <h2>No Link Page Exists</h2>
-<p style="font-size:0.85em; color:#666;">It may exist by another name, but we didn't find it. Enter the exact page name (spaces, capitalization matter).</p>
+<p class="section-desc">These Evernote link targets have no matching Import database record. The page may have been renamed, or the link may be orphaned. Enter the correct page name to manually resolve.</p>
 <table>
   <thead>
     <tr>
-      <th>Link Target</th>
+      <th>Targeted Un-Linkable Page</th>
+      <th>Source Page</th>
       <th>Import Page Override</th>
-      <th>Link Count</th>
+      <th>Page Link Count</th>
       <th>Resolve</th>
     </tr>
   </thead>
@@ -63,10 +74,11 @@
   {% for name, info in missing_targets %}
     <tr>
       <td>{{ name }}</td>
+      <td>{% if info.sources|length == 1 %}{{ info.sources[0] }}{% elif info.sources|length <= 3 %}{{ info.sources|join(', ') }}{% else %}{{ info.sources|length }} pages{% endif %}</td>
       <td>
-        <form method="post" action="/links/resolve" id="override-form-{{ loop.index }}" style="display:inline" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Linking...';">
+        <form method="post" action="/links/resolve" id="override-form-{{ loop.index }}" class="resolve-form" style="display:inline" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Resolving...';">
           <input type="hidden" name="page_name" value="{{ name }}">
-          <input type="text" name="override_target" placeholder="Exact page name" size="20">
+          <input type="text" name="override_target" placeholder="Exact page name" size="25">
       </td>
       <td>{{ info.count }}</td>
       <td>

@@ -1522,10 +1522,125 @@ def create_app() -> FastAPI:
             exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
             note_exc = [e for e in exceptions if e["note_id"] == note_id]
             title = note_exc[0]["title"] if note_exc else note_id
-            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "", "decrypted": decrypted_text, "title": title})
+            return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "", "decrypted": decrypted_text, "title": title, "note_id": note_id, "passphrase": passphrase})
         except Exception as exc:
             return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": f"Decryption failed: {exc}", "decrypted": "", "title": note_id})
 
+
+    @app.post("/passwords/permanently-decrypt/{note_id}")
+    def passwords_permanently_decrypt(request: Request, note_id: str, passphrase: str = Form(...)):
+        """Decrypt, replace marker block with plain text, update exception Link, mark Resolved."""
+        import base64 as _b64
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        if not notion_key:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        client = NotionClient(notion_key)
+        # Get encrypted content and Link from exception row
+        try:
+            row = client._api(f"pages/{note_id}", "GET")
+            props = row.get("properties", {})
+            enc_items = props.get("Encrypted Content", {}).get("rich_text", [])
+            encrypted_b64 = "".join(t.get("text", {}).get("content", "") for t in enc_items).strip()
+            link_url = props.get("Link", {}).get("url", "")
+        except Exception:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        if not encrypted_b64 or not link_url:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        # Parse page_id and block_id from Link
+        page_id = ""
+        block_id = ""
+        if "#" in link_url:
+            page_id_raw = link_url.split("/")[-1].split("#")[0]
+            block_id_raw = link_url.split("#")[-1]
+            if len(page_id_raw) == 32:
+                page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
+            if len(block_id_raw) == 32:
+                block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
+        if not page_id or not block_id:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        # Decrypt
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.primitives import padding, hashes
+            from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+            raw = _b64.b64decode(encrypted_b64)
+            salt = raw[4:20]
+            iv = raw[36:52]
+            ciphertext = raw[52:-32]
+            kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=16, salt=salt, iterations=50000)
+            key = kdf.derive(passphrase.encode("utf-8"))
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            padded = decryptor.update(ciphertext) + decryptor.finalize()
+            unpadder = padding.PKCS7(128).unpadder()
+            decrypted_text = (unpadder.update(padded) + unpadder.finalize()).decode("utf-8")
+            import re as _strip_re4
+            decrypted_text = _strip_re4.sub(r'<[^>]+>', '', decrypted_text).strip()
+        except Exception:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        # Replace marker block with decrypted plain text
+        try:
+            from e2n.notion import paragraph_block, plain_text_span
+            client.delete_block(block_id)
+            block = paragraph_block([plain_text_span(decrypted_text[:2000])])
+            result = client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
+            new_blocks = result.get("results", [])
+            new_block_id = new_blocks[0]["id"].replace("-", "") if new_blocks else ""
+            page_id_clean = page_id.replace("-", "")
+            resolved_url = f"https://www.notion.so/{page_id_clean}#{new_block_id}" if new_block_id else f"https://www.notion.so/{page_id_clean}"
+        except Exception:
+            resolved_url = ""
+        # Update exception: Status=Resolved, new Link, clear Encrypted Content
+        try:
+            update_props: dict = {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}
+            if resolved_url:
+                update_props["Link"] = {"url": resolved_url}
+            client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
+        except Exception:
+            pass
+        _invalidate_exceptions_cache()
+        return RedirectResponse(url="/passwords/", status_code=303)
+
+    @app.post("/passwords/delete-encrypted/{note_id}")
+    def passwords_delete_encrypted(request: Request, note_id: str):
+        """Delete the encrypted marker block from imported page, clear content, mark Resolved."""
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        if not notion_key:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        client = NotionClient(notion_key)
+        # Get Link from exception row
+        try:
+            row = client._api(f"pages/{note_id}", "GET")
+            props = row.get("properties", {})
+            link_url = props.get("Link", {}).get("url", "")
+        except Exception:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        if not link_url:
+            return RedirectResponse(url="/passwords/", status_code=303)
+        # Parse block_id from Link
+        block_id = ""
+        if "#" in link_url:
+            block_id_raw = link_url.split("#")[-1]
+            if len(block_id_raw) == 32:
+                block_id = f"{block_id_raw[:8]}-{block_id_raw[8:12]}-{block_id_raw[12:16]}-{block_id_raw[16:20]}-{block_id_raw[20:]}"
+        # Delete the marker block from the imported page
+        if block_id:
+            try:
+                client.delete_block(block_id)
+            except Exception:
+                pass
+        # Update exception: Status=Resolved, clear Encrypted Content, clear Link
+        try:
+            update_props: dict = {
+                "Status": {"select": {"name": "Resolved"}},
+                "Encrypted Content": {"rich_text": []},
+                "Link": {"url": None},
+            }
+            client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
+        except Exception:
+            pass
+        _invalidate_exceptions_cache()
+        return RedirectResponse(url="/passwords/", status_code=303)
     @app.post("/resolve/delete-empty-pages")
     def resolve_delete_empty_pages(request: Request):
         """Batch delete all empty pages (No Content exceptions) from Notion."""
