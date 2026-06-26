@@ -727,6 +727,59 @@ def create_app() -> FastAPI:
             return []
 
     @app.post("/refresh")
+
+    @app.post("/backfill-reasons")
+    def backfill_reasons(request: Request, redirect: str = Form("/")):
+        """One-time fix: populate empty Reason fields on exception rows."""
+        import httpx as _hx
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "")
+        notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
+        if not notion_key or not notion_root:
+            return RedirectResponse(url=redirect, status_code=303)
+        client = NotionClient(notion_key)
+        exc_db_id = _cache.get("exc_db_id")
+        if not exc_db_id:
+            br = bootstrap_notion_pages(notion_key, root_title=notion_root)
+            exc_db = ensure_exception_database(client, br.exceptions.page_id)
+            exc_db_id = exc_db.database_id
+            _cache["exc_db_id"] = exc_db_id
+        # Query all rows with empty Reason
+        headers = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+        body: dict = {"filter": {"property": "Reason", "multi_select": {"is_empty": True}}}
+        fixed = 0
+        while True:
+            results = client._api(f"databases/{exc_db_id}/query", "POST", body)
+            for page in results.get("results", []):
+                props = page.get("properties", {})
+                error_items = props.get("Error Message", {}).get("rich_text", [])
+                error_msg = "".join(t.get("text", {}).get("content", "") for t in error_items).lower()
+                link_items = props.get("Linkable Text", {}).get("rich_text", [])
+                link_text = "".join(t.get("text", {}).get("content", "") for t in link_items)
+                enc_items = props.get("Encrypted Content", {}).get("rich_text", [])
+                has_encrypted = bool("".join(t.get("text", {}).get("content", "") for t in enc_items).strip())
+                # Determine reason
+                if has_encrypted or "encrypted" in error_msg or "passphrase" in error_msg:
+                    reason = "Encrypted"
+                elif link_text or "evernote" in error_msg:
+                    reason = "Evernote Link"
+                elif "empty title" in error_msg or "no title" in error_msg:
+                    reason = "Empty Title"
+                elif "no content" in error_msg or "empty" in error_msg:
+                    reason = "No Content"
+                else:
+                    reason = "Unsupported Content"
+                # PATCH the Reason
+                _hx.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=headers, json={
+                    "properties": {"Reason": {"multi_select": [{"name": reason}]}}
+                }, timeout=60.0)
+                fixed += 1
+            if not results.get("has_more"):
+                break
+            body["start_cursor"] = results["next_cursor"]
+        _invalidate_exceptions_cache()
+        logging.getLogger("e2n.webui").info("Backfill complete: %d rows fixed", fixed)
+        return RedirectResponse(url=redirect, status_code=303)
+
     def refresh_page(request: Request, redirect: str = Form("/")):
         """Invalidate exceptions cache and redirect back to the calling page."""
         _invalidate_all_caches()
@@ -934,9 +987,6 @@ def create_app() -> FastAPI:
         return RedirectResponse(url="/resolve/", status_code=303)
         _invalidate_exceptions_cache()
         return RedirectResponse(url="/resolve/", status_code=303)
-
-    @app.get("/resolve/decrypt/{note_id}", response_class=HTMLResponse)
-    def resolve_decrypt_view(request: Request, note_id: str):
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         note_exceptions = [e for e in exceptions if e["note_id"] == note_id]
         hint = ""

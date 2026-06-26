@@ -13,7 +13,7 @@
 </head>
 <body>
 <h1>Evernote Link Management</h1>
-<a href="/" style="margin-right:1em;">← Home</a>
+<a href="/" style="margin-right:1em; display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">← Home</a>
 <form method="post" action="/refresh" style="display:inline;" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Refreshing...';">
   <input type="hidden" name="redirect" value="/links/">
   <button type="submit">&#x21bb; Refresh</button>
@@ -124,7 +124,7 @@
 
 {% endif %}
 
-<p><a href="/">← Home</a></p>
+<p><a href="/" style="display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">← Home</a></p>
 
 
 <div id="resolve-progress" style="display:none; padding:0.8em; background:#e8f4fd; border:1px solid #b8daff; margin:1em 0; font-style:italic;"></div>

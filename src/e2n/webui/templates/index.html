@@ -36,6 +36,10 @@
           <div><label>Processing Directory</label><input type="text" name="processing_directory" value="{{ processing_directory }}" placeholder="~/e2n-processing"></div>
         </div>
         <button type="submit" class="btn btn-blue" style="margin-bottom:1em;">Save Configuration</button>
+      <form method="post" action="/backfill-reasons" style="display:inline; margin-left:1em;">
+        <input type="hidden" name="redirect" value="/">
+        <button type="submit" class="btn btn-blue" onclick="this.disabled=true;this.textContent='Backfilling...';">Backfill Reasons</button>
+      </form>
       </form>
 
       <div id="loading">Loading, please be patient — pulling the exception content can take a couple minutes...</div>

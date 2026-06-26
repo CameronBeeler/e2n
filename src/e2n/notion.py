@@ -873,20 +873,6 @@ def ensure_child_database(
     """
     existing = _find_child_database(client.search_databases(database_title), parent_page_id, database_title)
     if existing is not None:
-        # Update schema: ensure all properties exist and enforce order via direct API
-        try:
-            import httpx
-            notion_key = getattr(client, "_notion_key", "")
-            if notion_key:
-                headers = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
-                props_payload = {k: v for k, v in properties.items() if k != "Name"}
-                httpx.patch(
-                    f"https://api.notion.com/v1/databases/{existing.database_id}",
-                    headers=headers, json={"properties": props_payload},
-                )
-        except Exception as exc:
-            import logging
-            logging.getLogger("e2n.notion").warning("Could not update database schema: %s", exc)
         return existing
     return client.create_database(parent_page_id, database_title, properties)
 
