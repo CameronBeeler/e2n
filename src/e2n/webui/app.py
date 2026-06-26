@@ -295,11 +295,21 @@ def create_app() -> FastAPI:
         if _wizard_state.get("step2_complete") != "true":
             return RedirectResponse(url="/wizard/step/2", status_code=303)
         try:
-            source = Path(_wizard_state["enex_source"])
-            proc_dir = Path(_wizard_state["processing_directory"])
-            result = extract_enex_notes(source, proc_dir)
+            source = Path(_wizard_state["enex_source"]).expanduser().resolve()
+            proc_dir = Path(_wizard_state["processing_directory"]).expanduser().resolve()
+            total = 0
+            if source.is_dir():
+                sources = sorted(p for p in source.iterdir() if p.is_file() and p.suffix.lower() == ".enex")
+                if not sources:
+                    raise FileNotFoundError(f"No .enex files found in: {source}")
+                for enex_file in sources:
+                    result = extract_enex_notes(enex_file, proc_dir)
+                    total += result.total_notes
+            else:
+                result = extract_enex_notes(source, proc_dir)
+                total = result.total_notes
             _wizard_state["step3_complete"] = "true"
-            _wizard_state["extracted_count"] = str(result.total_notes)
+            _wizard_state["extracted_count"] = str(total)
             return RedirectResponse(url="/wizard/step/4", status_code=303)
         except Exception as exc:
             return templates.TemplateResponse(
