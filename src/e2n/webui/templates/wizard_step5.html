@@ -23,12 +23,14 @@
 </table>
 
 <h2>Next Steps</h2>
+<div id="loading" style="display:none; padding:1em; background:#f0f0f0; text-align:center; font-style:italic;">Loading, please be patient — pulling the exception content can take a couple minutes...</div>
 <ul>
-  <li><a href="/links/">Manage Evernote Links</a> ({{ total_link_exceptions }} link exceptions)</li>
-  <li><a href="/passwords/">Manage Passwords</a> ({{ total_encrypted }} encrypted items)</li>
-  <li><a href="/resolve/">Resolution Workbench</a> (all exception types)</li>
+  <li><a href="/links/" class="nav-link">Manage Evernote Links</a> ({{ total_link_exceptions }} link exceptions)</li>
+  <li><a href="/passwords/" class="nav-link">Manage Passwords</a> ({{ total_encrypted }} encrypted items)</li>
+  <li><a href="/resolve/" class="nav-link">Resolution Workbench</a> (all exception types)</li>
 </ul>
 
 <p><a href="/">← Home</a></p>
+<script>document.querySelectorAll('a.nav-link').forEach(function(a){a.addEventListener('click',function(){document.getElementById('loading').style.display='block';})});</script>
 </body>
 </html>

@@ -539,6 +539,14 @@ def create_app() -> FastAPI:
                 total_imported += imported
                 total_exceptions += exc_count
 
+
+        # Override counts from Notion if available (more accurate post-import)
+        notion_exceptions = _load_exceptions_from_notion()
+        if notion_exceptions:
+            total_exceptions = len(notion_exceptions)
+            total_link_exceptions = sum(1 for e in notion_exceptions if "Evernote Link" in e.get("reasons", ""))
+            total_encrypted = sum(1 for e in notion_exceptions if "Encrypted" in e.get("reasons", ""))
+
         return templates.TemplateResponse(
             request=request,
             name="wizard_step5.html",
@@ -550,6 +558,7 @@ def create_app() -> FastAPI:
                 "total_encrypted": total_encrypted,
             },
         )
+
 
     # --- Resolution Workbench routes ---
 
@@ -1154,7 +1163,13 @@ def create_app() -> FastAPI:
     @app.get("/links/", response_class=HTMLResponse)
     def links_home(request: Request):
         """Show unique link targets — renders immediately, target existence checked in background."""
-        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
+        exceptions = _cache.get("notion_exceptions") or []
+        # If Notion cache is empty, kick off background fetch
+        if _cache.get("notion_exceptions") is None:
+            import threading
+            def _bg_load_exceptions():
+                _load_exceptions_from_notion()
+            threading.Thread(target=_bg_load_exceptions, daemon=True).start()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
         # Group by link_text (the target page name), track source pages
         targets: dict[str, dict] = {}
@@ -1345,7 +1360,7 @@ def create_app() -> FastAPI:
                         continue
                     target_url = target_matches[0].url or f"https://www.notion.so/{target_matches[0].page_id.replace('-', '')}"
 
-                with ThreadPoolExecutor(max_workers=4) as pool:
+                with ThreadPoolExecutor(max_workers=2) as pool:
                     for result in pool.map(lambda exc: _resolve_one(exc, target_url, page_name), refs):
                         if result == "resolved":
                             _resolve_progress["resolved"] += 1
@@ -1439,7 +1454,7 @@ def create_app() -> FastAPI:
                 except Exception:
                     return "failed"
 
-            with ThreadPoolExecutor(max_workers=4) as pool:
+            with ThreadPoolExecutor(max_workers=2) as pool:
                 for result in pool.map(_resolve_one, referencing):
                     if result == "resolved":
                         _resolve_progress["resolved"] += 1

@@ -393,6 +393,8 @@ class NotionClient:
                 raise NotionAPIError("Install notion-client to use Notion API features") from exc
             sdk_client = Client(auth=notion_key, notion_version="2022-06-28")
         self._sdk_client = sdk_client
+        self._rate_lock = __import__("threading").Lock()
+        self._last_request_time = 0.0
 
     def search_pages(self, query: str | None = None) -> list[NotionPageRef]:
         """Return pages shared with the integration, optionally filtered by title."""
@@ -674,11 +676,27 @@ class NotionClient:
             kwargs["body"] = body
         return self._sdk_call(self._sdk_client.request, **kwargs)
 
+
     def _sdk_call(self, sdk_method: Any, **kwargs: Any) -> JsonObject:
-        try:
-            return sdk_method(**kwargs)
-        except Exception as exc:
-            raise NotionAPIError(f"Notion SDK request failed: {exc}") from exc
+        import time
+        # Rate limit: minimum 350ms between requests (< 3 req/s)
+        lock = getattr(self, "_rate_lock", None)
+        if lock:
+            with lock:
+                elapsed = time.time() - self._last_request_time
+                if elapsed < 0.35:
+                    time.sleep(0.35 - elapsed)
+                self._last_request_time = time.time()
+        # Retry on rate limit (429)
+        for attempt in range(3):
+            try:
+                return sdk_method(**kwargs)
+            except Exception as exc:
+                if "rate" in str(exc).lower() or "429" in str(exc):
+                    time.sleep(1.0 * (attempt + 1))
+                    continue
+                raise NotionAPIError(f"Notion SDK request failed: {exc}") from exc
+        raise NotionAPIError("Notion API rate limited after 3 retries")
 
 
 def multi_select_property(values: tuple[str, ...] | list[str]) -> JsonObject:
@@ -709,17 +727,17 @@ def exception_database_properties() -> JsonObject:
     """Return the schema for the Import-Exceptions database."""
     return {
         "Note Name": {"title": {}},
-        EXCEPTION_KEY_PROPERTY: {"rich_text": {}},
-        EXCEPTION_STATUS_PROPERTY: {"select": {"options": [{"name": "Open"}, {"name": "Resolved"}, {"name": "Closed"}]}},
+        "Linkable Text": {"rich_text": {}},
         "Link": {"url": {}},
+        EXCEPTION_STATUS_PROPERTY: {"select": {"options": [{"name": "Open"}, {"name": "Resolved"}, {"name": "Closed"}]}},
         EXCEPTION_REASON_PROPERTY: {"multi_select": {}},
         "Error Message": {"rich_text": {}},
-        "Source File": {"rich_text": {}},
-        "Linkable Text": {"rich_text": {}},
-        "Evernote Attribute": {"rich_text": {}},
-        "Notion Target": {"rich_text": {}},
         "External Resource": {"rich_text": {}},
         "Encrypted Content": {"rich_text": {}},
+        "Source File": {"rich_text": {}},
+        "Evernote Attribute": {"rich_text": {}},
+        EXCEPTION_KEY_PROPERTY: {"rich_text": {}},
+        "Notion Target": {"rich_text": {}},
     }
 
 
