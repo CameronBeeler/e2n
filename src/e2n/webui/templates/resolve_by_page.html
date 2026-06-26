@@ -2,10 +2,11 @@
 <html>
 <head><title>e2n - Resolve: {{ note_id }}</title></head>
 <body>
+<a href="/" style="margin-right:1em; display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">← Home</a>
 <h1>Exceptions for {{ note_id }}</h1>
 <p>{{ exceptions | length }} exception(s)</p>
 <table>
-  <thead><tr><th>Reasons</th><th>Title</th><th>Link Text</th></tr></thead>
+  <thead><tr><th>Reasons</th><th>Title</th><th>Linkable Text</th></tr></thead>
   <tbody>
   {% for exc in exceptions %}
     <tr>
@@ -16,6 +17,6 @@
   {% endfor %}
   </tbody>
 </table>
-<p><a href="/resolve/">← Back to Workbench</a> · <a href="/" style="display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">Home</a></p>
+<p><a href="/resolve/" style="display:inline-block; padding:0.3em 0.8em; background:#0074d9; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">← Back to Workbench</a> <a href="/" style="margin-left:0.5em; display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">Home</a></p>
 </body>
 </html>
