@@ -8,6 +8,7 @@
   .section-desc { font-size: 0.9em; color: #555; margin: 0.3em 0 1em 0; }
   form.resolve-form button { transition: all 0.2s; }
   form.resolve-form button:disabled { background: #999; color: #fff; cursor: not-allowed; opacity: 0.7; }
+  .checking-indicator { color: #888; font-style: italic; }
 </style>
 </head>
 <body>
@@ -26,6 +27,10 @@
 <form method="post" action="/links/resolve-all" class="resolve-form" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Resolving all, please wait...';">
   <button type="submit">Auto-Resolve All Links →</button>
 </form>
+
+{% if checking %}
+<p class="checking-indicator" id="checking-msg">⏳ Checking link targets against import databases... (page will update automatically)</p>
+{% endif %}
 
 {% if exists_targets %}
 <h2>Link Page Exists</h2>
@@ -51,6 +56,31 @@
           <button type="submit">Resolve {{ info.count }} →</button>
         </form>
       </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if pending_targets %}
+<h2>Checking...</h2>
+<p class="section-desc">These targets are being verified against your import databases.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Targeted Link Page</th>
+      <th>Source Page</th>
+      <th>Page Link Count</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for name, info in pending_targets %}
+    <tr>
+      <td>{{ name }}</td>
+      <td>{% if info.sources|length == 1 %}{{ info.sources[0] }}{% elif info.sources|length <= 3 %}{{ info.sources|join(', ') }}{% else %}{{ info.sources|length }} pages{% endif %}</td>
+      <td>{{ info.count }}</td>
+      <td class="checking-indicator">checking...</td>
     </tr>
   {% endfor %}
   </tbody>
@@ -94,5 +124,28 @@
 {% endif %}
 
 <p><a href="/">← Home</a></p>
+
+{% if checking %}
+<script>
+(function() {
+  var interval = setInterval(function() {
+    fetch('/links/status').then(function(r){return r.json()}).then(function(data) {
+      if (!data.checking) {
+        clearInterval(interval);
+        window.location.reload();
+      } else {
+        // Check if any new targets resolved since page load — reload to show progress
+        var resolved = Object.values(data.targets).filter(function(s){return s !== 'pending'}).length;
+        var total = Object.keys(data.targets).length;
+        var msg = document.getElementById('checking-msg');
+        if (msg) msg.textContent = '⏳ Checking link targets... (' + resolved + '/' + total + ' done)';
+      }
+    }).catch(function(){});
+  }, 5000);
+  // Also reload every 30s to show progressive results
+  setTimeout(function(){ window.location.reload(); }, 30000);
+})();
+</script>
+{% endif %}
 </body>
 </html>

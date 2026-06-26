@@ -27,8 +27,6 @@ try:
     from notion_client import Client as _NotionSDKClient
 except ImportError:
     _NotionSDKClient = None  # type: ignore[assignment, misc]
-
-
 @dataclass(frozen=True)
 class RunCard:
     """Dashboard summary for one source processing directory."""
@@ -43,8 +41,6 @@ class RunCard:
     committed_count: int
     pending_count: int
     failed_count: int
-
-
 def create_app() -> FastAPI:
     """Build and return the local web UI application."""
     app = FastAPI(title="e2n Local UI", version="0.1.0")
@@ -586,9 +582,15 @@ def create_app() -> FastAPI:
 
     # Cached exceptions from Notion (invalidated on resolution actions)
     _cache: dict[str, list[dict] | None] = {"notion_exceptions": None, "exc_db_id": None, "import_db_ids": None}
+    # Link target resolution state: {name: "pending"|"exists"|"missing"}
+    _link_targets_status: dict[str, str] = {}
+    _link_targets_checking = [False]
 
     def _invalidate_exceptions_cache():
         _cache["notion_exceptions"] = None
+        _cache["exc_db_id"] = None
+        _cache["import_db_ids"] = None
+        _link_targets_status.clear()
 
     def _get_import_db_ids(client: NotionClient, notion_key: str) -> set[str]:
         """Get the set of import database IDs (under 'Evernote Import' page)."""
@@ -1122,7 +1124,7 @@ def create_app() -> FastAPI:
                 }
                 if resolved_url:
                     update_props["Link"] = {"url": resolved_url}
-                client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
+                client._api(f"pages/{note_id}", "PATCH", {"properties": update_props})
             except Exception:
                 pass
 
@@ -1131,9 +1133,10 @@ def create_app() -> FastAPI:
 
     # --- Evernote Link Management (first-class feature) ---
 
+
     @app.get("/links/", response_class=HTMLResponse)
     def links_home(request: Request):
-        """Show unique link targets split by whether the target page exists in imports."""
+        """Show unique link targets — renders immediately, target existence checked in background."""
         exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
         link_exceptions = [e for e in exceptions if "Evernote Link" in e["reasons"]]
         # Group by link_text (the target page name), track source pages
@@ -1148,39 +1151,77 @@ def create_app() -> FastAPI:
                 if src_title and src_title not in targets[lt]["sources"]:
                     targets[lt]["sources"].append(src_title)
 
-        # Check which targets exist in import databases
-        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
-        exists_set: set[str] = set()
-        if notion_key and targets:
-            try:
-                client = NotionClient(notion_key)
-                import_dbs = _get_import_db_ids(client, notion_key)
-                for name in targets:
-                    found = client.search_pages(name)
-                    if any(getattr(p, "parent_database_id", "") in import_dbs for p in found):
-                        exists_set.add(name)
-            except Exception:
-                pass
+        # Use cached status for split; kick off background check for unknowns
+        exists_targets = []
+        missing_targets = []
+        pending_targets = []
+        for name, info in targets.items():
+            status = _link_targets_status.get(name, "pending")
+            if status == "exists":
+                exists_targets.append((name, info))
+            elif status == "missing":
+                missing_targets.append((name, info))
+            else:
+                pending_targets.append((name, info))
 
-        # Split into exists / not-exists, each sorted by count desc then alpha
-        exists_targets = sorted(
-            [(n, info) for n, info in targets.items() if n in exists_set],
-            key=lambda x: (-x[1]["count"], x[0]),
-        )
-        missing_targets = sorted(
-            [(n, info) for n, info in targets.items() if n not in exists_set],
-            key=lambda x: (-x[1]["count"], x[0]),
-        )
+        # Sort each group
+        exists_targets.sort(key=lambda x: (-x[1]["count"], x[0]))
+        missing_targets.sort(key=lambda x: (-x[1]["count"], x[0]))
+        pending_targets.sort(key=lambda x: (x[1]["count"], x[0]))  # check simple (low-count) first
+
+        # Kick off background target checking if needed
+        if pending_targets and not _link_targets_checking[0]:
+            import threading
+            names_to_check = [name for name, _ in pending_targets]
+            for n in names_to_check:
+                _link_targets_status[n] = "pending"
+            t = threading.Thread(target=_check_link_targets_background, args=(names_to_check,), daemon=True)
+            t.start()
+
         return templates.TemplateResponse(
             request=request,
             name="links.html",
             context={
                 "exists_targets": exists_targets,
                 "missing_targets": missing_targets,
+                "pending_targets": pending_targets,
                 "total_links": len(link_exceptions),
                 "total_targets": len(targets),
+                "checking": bool(pending_targets) or _link_targets_checking[0],
             },
         )
+
+    def _check_link_targets_background(names: list[str]):
+        """Background thread: check each link target against import databases."""
+        _link_targets_checking[0] = True
+        notion_key = _wizard_state.get("notion_key", "") or os.environ.get("NOTION_KEY", "") or os.environ.get("NOTION_TOKEN", "")
+        if not notion_key:
+            _link_targets_checking[0] = False
+            return
+        try:
+            client = NotionClient(notion_key)
+            import_dbs = _get_import_db_ids(client, notion_key)
+            for name in names:
+                try:
+                    found = client.search_pages(name)
+                    if any(getattr(p, "parent_database_id", "") in import_dbs for p in found):
+                        _link_targets_status[name] = "exists"
+                    else:
+                        _link_targets_status[name] = "missing"
+                except Exception:
+                    _link_targets_status[name] = "missing"
+        except Exception:
+            pass
+        finally:
+            _link_targets_checking[0] = False
+
+    @app.get("/links/status")
+    def links_status():
+        """JSON endpoint for progressive link target checking status."""
+        return {
+            "checking": _link_targets_checking[0],
+            "targets": dict(_link_targets_status),
+        }
 
     @app.post("/links/resolve-all", response_class=HTMLResponse)
     def links_resolve_all(request: Request):
@@ -1402,8 +1443,14 @@ def create_app() -> FastAPI:
                     exc_db = ensure_exception_database(client, br.exceptions.page_id)
                     exc_db_id = exc_db.database_id
                     _cache["exc_db_id"] = exc_db_id
-                # Paginate to fetch ALL rows (including resolved)
-                body: dict = {}
+                # Query with filter: Reason contains "Encrypted" AND Status != "Resolved"
+                query_filter = {
+                    "and": [
+                        {"property": "Reason", "multi_select": {"contains": "Encrypted"}},
+                        {"property": "Status", "select": {"does_not_equal": "Resolved"}},
+                    ]
+                }
+                body: dict = {"filter": query_filter}
                 while True:
                     results = client._api(f"databases/{exc_db_id}/query", "POST", body)
                     for page in results.get("results", []):
@@ -1422,12 +1469,12 @@ def create_app() -> FastAPI:
                         })
                     if not results.get("has_more"):
                         break
-                    body = {"start_cursor": results["next_cursor"]}
+                    body = {"filter": query_filter, "start_cursor": results["next_cursor"]}
             except Exception as exc:
                 logging.getLogger("e2n.webui").warning("Password page: failed to load exceptions from Notion: %s", exc)
         if not all_exceptions:
             all_exceptions = _load_exceptions_from_processing()
-        encrypted = [e for e in all_exceptions if "Encrypted" in e.get("reasons", "") or "encrypted" in e.get("error_message", "").lower() or "passphrase" in e.get("error_message", "").lower()]
+        encrypted = all_exceptions  # Already filtered server-side: Reason=Encrypted, Status!=Resolved
         return templates.TemplateResponse(
             request=request,
             name="passwords.html",
@@ -1525,8 +1572,6 @@ def create_app() -> FastAPI:
             return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": "", "decrypted": decrypted_text, "title": title, "note_id": note_id, "passphrase": passphrase})
         except Exception as exc:
             return templates.TemplateResponse(request=request, name="passwords_result.html", context={"error": f"Decryption failed: {exc}", "decrypted": "", "title": note_id})
-
-
     @app.post("/passwords/permanently-decrypt/{note_id}")
     def passwords_permanently_decrypt(request: Request, note_id: str, passphrase: str = Form(...)):
         """Decrypt, replace marker block with plain text, update exception Link, mark Resolved."""
@@ -1591,13 +1636,13 @@ def create_app() -> FastAPI:
         except Exception:
             resolved_url = ""
         # Update exception: Status=Resolved, new Link, clear Encrypted Content
-        try:
-            update_props: dict = {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}
-            if resolved_url:
-                update_props["Link"] = {"url": resolved_url}
-            client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
-        except Exception:
-            pass
+        import httpx as _req
+        _headers = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+        _update_body = {"properties": {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}}
+        if resolved_url:
+            _update_body["properties"]["Link"] = {"url": resolved_url}
+        _resp = _req.patch(f"https://api.notion.com/v1/pages/{note_id}", headers=_headers, json=_update_body)
+        logging.getLogger("e2n.webui").info("Permanently decrypt update: %s %s", _resp.status_code, _resp.text[:200] if _resp.status_code != 200 else "OK")
         _invalidate_exceptions_cache()
         return RedirectResponse(url="/passwords/", status_code=303)
 
@@ -1630,15 +1675,11 @@ def create_app() -> FastAPI:
             except Exception:
                 pass
         # Update exception: Status=Resolved, clear Encrypted Content, clear Link
-        try:
-            update_props: dict = {
-                "Status": {"select": {"name": "Resolved"}},
-                "Encrypted Content": {"rich_text": []},
-                "Link": {"url": None},
-            }
-            client._sdk_call(client._sdk_client.pages.update, page_id=note_id, properties=update_props)
-        except Exception:
-            pass
+        import httpx as _req2
+        _hdrs = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+        _del_body = {"properties": {"Status": {"select": {"name": "Resolved"}}, "Encrypted Content": {"rich_text": []}}}
+        _resp2 = _req2.patch(f"https://api.notion.com/v1/pages/{note_id}", headers=_hdrs, json=_del_body)
+        logging.getLogger("e2n.webui").info("Delete encrypted update: %s %s", _resp2.status_code, _resp2.text[:200] if _resp2.status_code != 200 else "OK")
         _invalidate_exceptions_cache()
         return RedirectResponse(url="/passwords/", status_code=303)
     @app.post("/resolve/delete-empty-pages")
@@ -1752,8 +1793,6 @@ def create_app() -> FastAPI:
         return {"status": status, "total_notes": total, "processed": processed, "current": ""}
 
     return app
-
-
 def _build_notion_import_args(
     enex_source: str,
     processing_dir: str,
@@ -1779,8 +1818,6 @@ def _build_notion_import_args(
     args.wipe_local = wipe_local
     args.wipe_remote = wipe_remote
     return args
-
-
 def _collect_run_cards(processing_directory: Path) -> list[RunCard]:
     """Return dashboard cards for each processing child with durable state."""
     if not processing_directory.exists() or not processing_directory.is_dir():
@@ -1829,13 +1866,9 @@ def _collect_run_cards(processing_directory: Path) -> list[RunCard]:
             store.close()
 
     return cards
-
-
 def _redirect_with_message(processing_dir: str, message: str) -> RedirectResponse:
     target = "/?" + urlencode({"processing_dir": processing_dir, "message": message})
     return RedirectResponse(url=target, status_code=303)
-
-
 def _redirect_with_error(processing_dir: str, error: str) -> RedirectResponse:
     target = "/?" + urlencode({"processing_dir": processing_dir, "error": error})
     return RedirectResponse(url=target, status_code=303)
