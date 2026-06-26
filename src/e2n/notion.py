@@ -600,6 +600,7 @@ class NotionClient:
             f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
             headers={"Authorization": f"Bearer {self._notion_key}", "Notion-Version": "2022-06-28"},
             files={"file": (local_path.name, file_data, content_type)},
+            timeout=60.0,
         )
         if resp.status_code >= 400:
             raise NotionAPIError(f"File upload failed: {resp.status_code} {resp.text[:200]}")
@@ -694,13 +695,13 @@ class NotionClient:
         for attempt in range(3):
             try:
                 if method == "GET":
-                    resp = _httpx.get(url, headers=headers)
+                    resp = _httpx.get(url, headers=headers, timeout=60.0)
                 elif method == "POST":
-                    resp = _httpx.post(url, headers=headers, json=body)
+                    resp = _httpx.post(url, headers=headers, json=body, timeout=60.0)
                 elif method == "PATCH":
-                    resp = _httpx.patch(url, headers=headers, json=body)
+                    resp = _httpx.patch(url, headers=headers, json=body, timeout=60.0)
                 elif method == "DELETE":
-                    resp = _httpx.delete(url, headers=headers)
+                    resp = _httpx.delete(url, headers=headers, timeout=60.0)
                 else:
                     raise NotionAPIError(f"Unsupported method: {method}")
                 if resp.status_code == 429:
