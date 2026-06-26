@@ -747,7 +747,8 @@ def create_app() -> FastAPI:
         headers = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
         body: dict = {"filter": {"property": "Reason", "multi_select": {"is_empty": True}}}
         fixed = 0
-        while True:
+        try:
+          while True:
             results = client._api(f"databases/{exc_db_id}/query", "POST", body)
             for page in results.get("results", []):
                 props = page.get("properties", {})
@@ -769,13 +770,17 @@ def create_app() -> FastAPI:
                 else:
                     reason = "Unsupported Content"
                 # PATCH the Reason
-                _hx.patch(f"https://api.notion.com/v1/pages/{page['id']}", headers=headers, json={
-                    "properties": {"Reason": {"multi_select": [{"name": reason}]}}
-                }, timeout=60.0)
-                fixed += 1
+                try:
+                    client._api(f"pages/{page['id']}", "PATCH", {"properties": {"Reason": {"multi_select": [{"name": reason}]}}})
+                    fixed += 1
+                except Exception:
+                    pass
             if not results.get("has_more"):
                 break
             body["start_cursor"] = results["next_cursor"]
+            body["start_cursor"] = results["next_cursor"]
+        except Exception:
+            pass
         _invalidate_exceptions_cache()
         logging.getLogger("e2n.webui").info("Backfill complete: %d rows fixed", fixed)
         return RedirectResponse(url=redirect, status_code=303)
@@ -1465,97 +1470,106 @@ def create_app() -> FastAPI:
 
 
     @app.post("/links/resolve")
-    def links_resolve(request: Request, page_name: str = Form(...), search_source: str = Form("Evernote Import"), override_target: str = Form("")):
-        """Kick off link resolution in background, redirect immediately."""
-        import threading
+
+    @app.post("/links/resolve")
+    def links_resolve(request: Request, page_name: str = Form(...), override_target: str = Form("")):
+        """Resolve links synchronously, show summary page."""
+        import logging
+        from concurrent.futures import ThreadPoolExecutor
+        link_log = logging.getLogger("e2n.webui.links")
+
         notion_key = _wizard_state.get("notion_key", "")
         if not notion_key:
-            return RedirectResponse(url="/links/", status_code=303)
+            return templates.TemplateResponse(request=request, name="links_result.html",
+                context={"error": "No Notion key configured.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []})
 
+        client = NotionClient(notion_key)
         search_name = override_target.strip() if override_target.strip() else page_name
 
-        def _do_resolve():
-            import logging
-            from concurrent.futures import ThreadPoolExecutor
-            link_log = logging.getLogger("e2n.webui.links")
+        # Find target page (cache-first)
+        cached = _link_target_pages.get(search_name)
+        if cached:
+            target_url = cached["url"]
+        else:
+            all_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
+            import_dbs = _get_import_db_ids(client, notion_key)
+            target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") in import_dbs] if import_dbs else all_matches
+            if not target_matches:
+                return templates.TemplateResponse(request=request, name="links_result.html",
+                    context={"error": f"Page '{search_name}' not found in import databases.", "page_name": page_name, "resolved": 0, "failed": 0, "results": []})
+            target_url = target_matches[0].url or f"https://www.notion.so/{target_matches[0].page_id.replace('-', '')}"
 
-            client = NotionClient(notion_key)
+        # Find referencing exceptions
+        exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
+        referencing = [e for e in exceptions if "Evernote Link" in e["reasons"] and e.get("link_text", "").strip() == page_name]
 
-            # Find target page (cache-first)
-            cached = _link_target_pages.get(search_name)
-            if cached:
-                target_url = cached["url"]
-            else:
-                all_matches = [p for p in client.search_pages(search_name) if p.title == search_name]
-                import_dbs = _get_import_db_ids(client, notion_key)
-                target_matches = [p for p in all_matches if getattr(p, "parent_database_id", "") in import_dbs] if import_dbs else all_matches
-                if not target_matches:
-                    _resolve_progress.update({"active": False, "message": f"Page '{search_name}' not found"})
-                    return
-                target_url = target_matches[0].url or f"https://www.notion.so/{target_matches[0].page_id.replace('-', '')}"
+        def _resolve_one(exc: dict) -> dict:
+            block_url = exc.get("block_url", "")
+            exc_row_id = exc.get("note_id", "")
+            block_id = ""
+            if "#" in block_url:
+                bid = block_url.split("#")[-1]
+                block_id = f"{bid[:8]}-{bid[8:12]}-{bid[12:16]}-{bid[16:20]}-{bid[20:]}" if len(bid) == 32 else bid
+            if not block_id:
+                page_url_raw = block_url.split("#")[0] if block_url else ""
+                pid_raw = page_url_raw.split("/")[-1][:32] if page_url_raw else ""
+                if pid_raw and len(pid_raw) == 32:
+                    src_pid = f"{pid_raw[:8]}-{pid_raw[8:12]}-{pid_raw[12:16]}-{pid_raw[16:20]}-{pid_raw[20:]}"
+                    try:
+                        seg = target_url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
+                        cand = seg[-32:] if len(seg) >= 32 else seg
+                        t_pid = f"{cand[:8]}-{cand[8:12]}-{cand[12:16]}-{cand[16:20]}-{cand[20:]}" if len(cand) == 32 and all(c in "0123456789abcdef" for c in cand) else ""
+                        blk = {"paragraph": {"rich_text": [{"type": "mention", "mention": {"type": "page", "page": {"id": t_pid}}}]}} if t_pid else {"paragraph": {"rich_text": [{"type": "text", "text": {"content": search_name, "link": {"url": target_url}}}]}}
+                        client._api(f"blocks/{src_pid}/children", "PATCH", {"children": [blk]})
+                        if exc_row_id:
+                            import httpx
+                            httpx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={"properties": {"Status": {"select": {"name": "Resolved"}}, "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]}}}, timeout=60.0)
+                        return {"title": exc["title"], "status": "resolved", "reason": f"-> {search_name}"}
+                    except Exception as e:
+                        return {"title": exc["title"], "status": "failed", "reason": str(e)[:80]}
+                return {"title": exc["title"], "status": "failed", "reason": "no block reference"}
+            try:
+                client.update_block_with_page_link(block_id, search_name, target_url)
+                if exc_row_id:
+                    import httpx
+                    httpx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={
+                        "properties": {"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url or target_url}, "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]}}
+                    }, timeout=60.0)
+                return {"title": exc["title"], "status": "resolved", "reason": f"-> {search_name}"}
+            except Exception as e:
+                return {"title": exc["title"], "status": "failed", "reason": str(e)[:80]}
 
-            # Find referencing exceptions
-            exceptions = _load_exceptions_from_notion() or _load_exceptions_from_processing()
-            referencing = [e for e in exceptions if "Evernote Link" in e["reasons"] and e.get("link_text", "").strip() == page_name]
-            _resolve_progress.update({"active": True, "resolved": 0, "failed": 0, "total": len(referencing), "message": f"Resolving {search_name}..."})
 
-            def _resolve_one(exc: dict) -> str:
-                block_url = exc.get("block_url", "")
-                exc_row_id = exc.get("note_id", "")
-                block_id = ""
-                if "#" in block_url:
-                    bid = block_url.split("#")[-1]
-                    block_id = f"{bid[:8]}-{bid[8:12]}-{bid[12:16]}-{bid[16:20]}-{bid[20:]}" if len(bid) == 32 else bid
-
-                if not block_id:
-                    # No callout marker — append link to end of source page
-                    page_url_raw = block_url.split("#")[0] if block_url else ""
-                    page_id_raw = page_url_raw.split("/")[-1][:32] if page_url_raw else ""
-                    if page_id_raw and len(page_id_raw) == 32:
-                        source_page_id = f"{page_id_raw[:8]}-{page_id_raw[8:12]}-{page_id_raw[12:16]}-{page_id_raw[16:20]}-{page_id_raw[20:]}"
-                        try:
-                            seg = target_url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
-                            cand = seg[-32:] if len(seg) >= 32 else seg
-                            t_page_id = f"{cand[:8]}-{cand[8:12]}-{cand[12:16]}-{cand[16:20]}-{cand[20:]}" if len(cand) == 32 and all(c in "0123456789abcdef" for c in cand) else ""
-                            if t_page_id:
-                                new_block = {"paragraph": {"rich_text": [{"type": "mention", "mention": {"type": "page", "page": {"id": t_page_id}}}]}}
-                            else:
-                                new_block = {"paragraph": {"rich_text": [{"type": "text", "text": {"content": search_name, "link": {"url": target_url}}}]}}
-                            client._api(f"blocks/{source_page_id}/children", "PATCH", {"children": [new_block]})
-                            # Mark resolved
-                            if exc_row_id:
-                                import httpx
-                                httpx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={"properties": {"Status": {"select": {"name": "Resolved"}}, "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]}}})
-                            return "resolved"
-                        except Exception:
-                            return "failed"
-                    else:
-                        return "failed"
-
-                try:
-                    client.update_block_with_page_link(block_id, search_name, target_url)
-                    if exc_row_id:
-                        import httpx
-                        httpx.patch(f"https://api.notion.com/v1/pages/{exc_row_id}", headers={"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}, json={
-                            "properties": {"Status": {"select": {"name": "Resolved"}}, "Link": {"url": block_url or target_url}, "Linkable Text": {"rich_text": [{"text": {"content": search_name}}]}}
-                        })
-                    return "resolved"
-                except Exception:
-                    return "failed"
-
+        if len(referencing) < 5:
+            # Small batch: resolve synchronously, show summary
             with ThreadPoolExecutor(max_workers=2) as pool:
-                for result in pool.map(_resolve_one, referencing):
-                    if result == "resolved":
-                        _resolve_progress["resolved"] += 1
-                    else:
-                        _resolve_progress["failed"] += 1
-
-            _resolve_progress.update({"active": False, "message": f"Done: {_resolve_progress['resolved']} resolved, {_resolve_progress['failed']} failed"})
+                results = list(pool.map(_resolve_one, referencing))
+            resolved = sum(1 for r in results if r["status"] == "resolved")
+            failed = sum(1 for r in results if r["status"] == "failed")
+            link_log.info("Link resolution: %d resolved, %d failed for '%s'", resolved, failed, page_name)
             _invalidate_exceptions_cache()
-            link_log.info("Link resolution complete: %s", _resolve_progress["message"])
+            import threading
+            threading.Thread(target=_load_exceptions_from_notion, daemon=True).start()
+            return templates.TemplateResponse(request=request, name="links_result.html",
+                context={"error": "", "page_name": page_name, "resolved": resolved, "failed": failed, "results": results})
+        else:
+            # Large batch: resolve in background, redirect with progress
+            import threading
+            _resolve_progress.update({"active": True, "resolved": 0, "failed": 0, "total": len(referencing), "message": f"Resolving {search_name} ({len(referencing)} links)..."})
+            def _bg_resolve():
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    for result in pool.map(_resolve_one, referencing):
+                        if result["status"] == "resolved":
+                            _resolve_progress["resolved"] += 1
+                        else:
+                            _resolve_progress["failed"] += 1
+                _resolve_progress.update({"active": False, "message": f"Done: {_resolve_progress['resolved']} resolved, {_resolve_progress['failed']} failed"})
+                _invalidate_exceptions_cache()
+                link_log.info("Link resolution complete: %s", _resolve_progress["message"])
+            threading.Thread(target=_bg_resolve, daemon=True).start()
+            return RedirectResponse(url="/links/", status_code=303)
 
-        threading.Thread(target=_do_resolve, daemon=True).start()
-        return RedirectResponse(url="/links/", status_code=303)
+
 
     # --- Trivial resolution routes ---
 

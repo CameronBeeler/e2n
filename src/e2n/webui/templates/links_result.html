@@ -3,13 +3,15 @@
 <head><title>e2n — Link Resolution: {{ page_name }}</title></head>
 <body>
 <h1>Link Resolution: {{ page_name }}</h1>
+<a href="/" style="margin-right:1em; display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">← Home</a>
+<a href="/links/" style="display:inline-block; padding:0.3em 0.8em; background:#0074d9; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">Evernote Link Management</a>
 
 {% if error %}
 <p class="error">{{ error }}</p>
 {% else %}
-<p>Resolved: {{ resolved }} | Failed: {{ failed }}</p>
+<p><strong>Resolved: {{ resolved }}</strong> | Failed: {{ failed }}</p>
 <table>
-  <thead><tr><th>Referencing Page</th><th>Status</th><th>Detail</th></tr></thead>
+  <thead><tr><th>Source Page</th><th>Status</th><th>Detail</th></tr></thead>
   <tbody>
   {% for r in results %}
     <tr>
@@ -22,6 +24,9 @@
 </table>
 {% endif %}
 
-<p><a href="/links/">← Back to Link Management</a> · <a href="/" style="display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">Home</a></p>
+<p>
+  <a href="/" style="display:inline-block; padding:0.3em 0.8em; background:#555; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">← Home</a>
+  <a href="/links/" style="margin-left:0.5em; display:inline-block; padding:0.3em 0.8em; background:#0074d9; color:#fff; border-radius:4px; text-decoration:none; font-size:0.85em;">Evernote Link Management</a>
+</p>
 </body>
 </html>

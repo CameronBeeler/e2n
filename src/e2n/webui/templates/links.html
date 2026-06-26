@@ -25,7 +25,7 @@
 {% else %}
 <h2>Auto-Resolve All</h2>
 <p>Process all link targets from most-referenced to least. Only resolves where an exact page match exists in the import databases.</p>
-<form method="post" action="/links/resolve-all" class="resolve-form" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Resolving all, please wait...';">
+<form method="post" action="/links/resolve-all" class="resolve-form" onsubmit="var b=this.querySelector('button');b.disabled=true;b.style.background='#999';b.textContent='Resolving all...';document.getElementById('resolve-progress').style.display='block';document.getElementById('resolve-progress').textContent='⚙️ Resolving all links, please wait...';">
   <button type="submit">Auto-Resolve All Links →</button>
 </form>
 
@@ -52,7 +52,7 @@
       <td>{% if info.sources|length == 1 %}{{ info.sources[0] }}{% elif info.sources|length <= 3 %}{{ info.sources|join(', ') }}{% else %}{{ info.sources|length }} pages{% endif %}</td>
       <td>{{ info.count }}</td>
       <td>
-        <form method="post" action="/links/resolve" class="resolve-form" style="display:inline" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Resolving...';">
+        <form method="post" action="/links/resolve" class="resolve-form" style="display:inline" onsubmit="var b=this.querySelector('button');b.disabled=true;b.style.background='#999';b.textContent='Resolving...';document.getElementById('resolve-progress').style.display='block';document.getElementById('resolve-progress').textContent='⚙️ Submitting resolution request...';">
           <input type="hidden" name="page_name" value="{{ name }}">
           <button type="submit">Resolve {{ info.count }} →</button>
         </form>
@@ -107,7 +107,7 @@
       <td>{{ name }}</td>
       <td>{% if info.sources|length == 1 %}{{ info.sources[0] }}{% elif info.sources|length <= 3 %}{{ info.sources|join(', ') }}{% else %}{{ info.sources|length }} pages{% endif %}</td>
       <td>
-        <form method="post" action="/links/resolve" id="override-form-{{ loop.index }}" class="resolve-form" style="display:inline" onsubmit="var b=this.querySelector('button');b.disabled=true;b.textContent='Resolving...';">
+        <form method="post" action="/links/resolve" id="override-form-{{ loop.index }}" class="resolve-form" style="display:inline" onsubmit="var b=this.querySelector('button');b.disabled=true;b.style.background='#999';b.textContent='Resolving...';document.getElementById('resolve-progress').style.display='block';document.getElementById('resolve-progress').textContent='⚙️ Submitting resolution request...';">
           <input type="hidden" name="page_name" value="{{ name }}">
           <input type="text" name="override_target" placeholder="Exact page name" size="25">
       </td>
@@ -139,9 +139,15 @@
         progDiv.style.display = 'block';
         progDiv.textContent = '⚙️ ' + data.resolve_message + ' (' + data.resolve_resolved + '/' + data.resolve_total + ' done)';
       } else if (data.resolve_message && data.resolve_message.indexOf('Done') === 0) {
-        progDiv.style.display = 'block';
-        progDiv.textContent = '✓ ' + data.resolve_message;
-        setTimeout(function(){ window.location.reload(); }, 1500);
+        progDiv.style.display = "block";
+        progDiv.textContent = "✓ " + data.resolve_message + " — refreshing shortly...";
+        if (!window._doneReloading) { window._doneReloading = true; setTimeout(function(){ window.location.reload(); }, 8000); }
+        progDiv.style.display = "block";
+        progDiv.textContent = "✓ " + data.resolve_message + " — refreshing shortly...";
+        if (!window._doneReloading) { window._doneReloading = true; setTimeout(function(){ window.location.reload(); }, 8000); }
+        progDiv.style.display = "block";
+        progDiv.textContent = "✓ " + data.resolve_message + " — refreshing shortly...";
+        if (!window._doneReloading) { window._doneReloading = true; setTimeout(function(){ window.location.reload(); }, 8000); }
         return;
       } else {
         progDiv.style.display = 'none';
@@ -157,12 +163,16 @@
         var resolved = Object.values(data.targets).filter(function(s){return s !== 'pending'}).length;
         var total = Object.keys(data.targets).length;
         msg.textContent = '⏳ Checking link targets... (' + resolved + '/' + total + ' done)';
-      } else if (!data.checking && !data.resolving && !data.loading) {
+      } else if (!data.checking && !data.resolving && !data.loading && !(data.resolve_message && data.resolve_message.indexOf("Done") === 0)) {
         clearInterval(interval);
         window.location.reload();
       }
     }).catch(function(){});
   }, 3000);
+  // Stop polling when any resolve form is submitted
+  document.querySelectorAll("form.resolve-form").forEach(function(f){
+    f.addEventListener("submit", function(){ clearInterval(interval); });
+  });
 })();
 </script>
 </body>
