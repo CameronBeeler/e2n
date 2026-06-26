@@ -45,7 +45,41 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(request=request, name="index.html")
+        return templates.TemplateResponse(request=request, name="index.html", context={
+            "notion_key": _wizard_state.get("notion_key", ""),
+            "notion_root": _wizard_state.get("notion_root", ""),
+            "enex_source": _wizard_state.get("enex_source", ""),
+            "processing_directory": _wizard_state.get("processing_directory", ""),
+            "configured": bool(_wizard_state.get("notion_key") and _wizard_state.get("notion_root") and _wizard_state.get("enex_source") and _wizard_state.get("processing_directory")),
+        })
+
+
+    @app.post("/config")
+    def save_config(
+        notion_key: str = Form(""),
+        notion_root: str = Form(""),
+        enex_source: str = Form(""),
+        processing_directory: str = Form(""),
+    ):
+        """Save configuration values for the session."""
+        if notion_key.strip():
+            _wizard_state["notion_key"] = notion_key.strip()
+            os.environ["NOTION_KEY"] = notion_key.strip()
+        if notion_root.strip():
+            _wizard_state["notion_root"] = notion_root.strip()
+            os.environ["NOTION_ROOT"] = notion_root.strip()
+        if enex_source.strip():
+            _wizard_state["enex_source"] = enex_source.strip()
+        if processing_directory.strip():
+            proc_path = Path(processing_directory).expanduser().resolve()
+            proc_path.mkdir(parents=True, exist_ok=True)
+            _wizard_state["processing_directory"] = str(proc_path)
+        # Mark wizard steps as complete so migration can start at extraction
+        if _wizard_state.get("notion_key") and _wizard_state.get("notion_root"):
+            _wizard_state["step1_complete"] = "true"
+            _wizard_state["step2_complete"] = "true"
+        _save_wizard_config()
+        return RedirectResponse(url="/", status_code=303)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -162,11 +196,16 @@ def create_app() -> FastAPI:
 
     @app.get("/wizard/", response_class=HTMLResponse)
     def wizard_root(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse(
-            request=request,
-            name="wizard_step1.html",
-            context={"error": ""},
-        )
+        """Wizard now starts at extraction (config is on home page)."""
+        if not _wizard_state.get("step2_complete"):
+            return RedirectResponse(url="/", status_code=303)
+        return RedirectResponse(url="/wizard/step/3", status_code=303)
+
+
+
+
+
+
 
     @app.post("/wizard/step/1")
     def wizard_step_1_post(
