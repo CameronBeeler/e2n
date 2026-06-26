@@ -506,52 +506,62 @@ class NotionClient:
         """Archive one Notion page by id for cleanup workflows."""
         return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
 
+
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
-        """Replace a block with a plain paragraph containing an inline page mention."""
-        # Get the block's parent page_id first
+        """Replace a block with a paragraph link at the same position in the page."""
+        # Get the block's parent and find the preceding sibling for position
         try:
-            block_info = self._sdk_call(self._sdk_client.blocks.retrieve, block_id=block_id)
+            block_info = self._api(f"blocks/{block_id}", "GET")
             parent = block_info.get("parent", {})
             parent_id = parent.get("page_id") or parent.get("block_id", "")
         except Exception:
             parent_id = ""
 
+        # Find the block that precedes this one (for positional insert)
+        prev_block_id = ""
+        if parent_id:
+            try:
+                children = self.list_block_children(parent_id)
+                for i, child in enumerate(children):
+                    if child["id"] == block_id or child["id"].replace("-", "") == block_id.replace("-", ""):
+                        if i > 0:
+                            prev_block_id = children[i - 1]["id"]
+                        break
+            except Exception:
+                pass
+
         # Delete the old block (callout/placeholder)
         self.delete_block(block_id)
 
-        # Extract page_id from URL for a mention (avoids Notion's link preview box)
-        # URL format: https://www.notion.so/{page_id_no_dashes} or with title slug
+        # Extract page_id from URL for a mention
         page_id = ""
         if page_url:
-            # Last path segment (strip query), take last 32 hex chars
             segment = page_url.rstrip("/").split("/")[-1].split("?")[0].split("#")[0]
-            # May have title-slug-pageid format (last 32 chars are the ID)
             candidate = segment[-32:] if len(segment) >= 32 else segment
             if all(c in "0123456789abcdef" for c in candidate) and len(candidate) == 32:
                 page_id = f"{candidate[:8]}-{candidate[8:12]}-{candidate[12:16]}-{candidate[16:20]}-{candidate[20:]}"
 
-        # Append a new paragraph with page mention (renders as inline link, no box)
-        if parent_id and page_id:
+        # Build the new block
+        if page_id:
             new_block = {
                 "paragraph": {
                     "rich_text": [{"type": "mention", "mention": {"type": "page", "page": {"id": page_id}}}]
                 }
             }
-            try:
-                result = self._sdk_call(self._sdk_client.blocks.children.append, block_id=parent_id, children=[new_block])
-                return result
-            except Exception:
-                pass
-        elif parent_id:
-            # Fallback: plain text link if we can't extract page_id
+        else:
             new_block = {
                 "paragraph": {
                     "rich_text": [{"type": "text", "text": {"content": link_text, "link": {"url": page_url}}}]
                 }
             }
+
+        # Insert at the same position using 'after' parameter
+        if parent_id:
+            body: dict = {"children": [new_block]}
+            if prev_block_id:
+                body["after"] = prev_block_id
             try:
-                result = self._sdk_call(self._sdk_client.blocks.children.append, block_id=parent_id, children=[new_block])
-                return result
+                return self._api(f"blocks/{parent_id}/children", "PATCH", body)
             except Exception:
                 pass
         return {}

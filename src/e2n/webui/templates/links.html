@@ -125,27 +125,39 @@
 
 <p><a href="/">← Home</a></p>
 
-{% if checking %}
+
+<div id="resolve-progress" style="display:none; padding:0.8em; background:#e8f4fd; border:1px solid #b8daff; margin:1em 0; font-style:italic;"></div>
+
 <script>
 (function() {
   var interval = setInterval(function() {
     fetch('/links/status').then(function(r){return r.json()}).then(function(data) {
-      if (!data.checking) {
-        clearInterval(interval);
-        window.location.reload();
+      var progDiv = document.getElementById('resolve-progress');
+      // Handle resolve progress
+      if (data.resolving) {
+        progDiv.style.display = 'block';
+        progDiv.textContent = '⚙️ ' + data.resolve_message + ' (' + data.resolve_resolved + '/' + data.resolve_total + ' done)';
+      } else if (data.resolve_message && data.resolve_message.indexOf('Done') === 0) {
+        progDiv.style.display = 'block';
+        progDiv.textContent = '✓ ' + data.resolve_message;
+        setTimeout(function(){ window.location.reload(); }, 1500);
+        return;
       } else {
-        // Check if any new targets resolved since page load — reload to show progress
+        progDiv.style.display = 'none';
+      }
+      // Handle target checking
+      var msg = document.getElementById('checking-msg');
+      if (data.checking && msg) {
         var resolved = Object.values(data.targets).filter(function(s){return s !== 'pending'}).length;
         var total = Object.keys(data.targets).length;
-        var msg = document.getElementById('checking-msg');
-        if (msg) msg.textContent = '⏳ Checking link targets... (' + resolved + '/' + total + ' done)';
+        msg.textContent = '⏳ Checking link targets... (' + resolved + '/' + total + ' done)';
+      } else if (!data.checking && !data.resolving) {
+        clearInterval(interval);
+        window.location.reload();
       }
     }).catch(function(){});
-  }, 5000);
-  // Also reload every 30s to show progressive results
-  setTimeout(function(){ window.location.reload(); }, 30000);
+  }, 3000);
 })();
 </script>
-{% endif %}
 </body>
 </html>
