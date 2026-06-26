@@ -23,10 +23,6 @@ from e2n.notion import (
 )
 from e2n.state import ProcessingStateStore
 
-try:
-    from notion_client import Client as _NotionSDKClient
-except ImportError:
-    _NotionSDKClient = None  # type: ignore[assignment, misc]
 @dataclass(frozen=True)
 class RunCard:
     """Dashboard summary for one source processing directory."""
@@ -1133,7 +1129,7 @@ def create_app() -> FastAPI:
             try:
                 client.delete_block(block_id)
                 block = paragraph_block([plain_text_span(decrypted_text[:2000])])
-                result = client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
+                result = client._api(f"blocks/{page_id}/children", "PATCH", {"children": [block]})
                 # Get the new block's URL
                 new_blocks = result.get("results", [])
                 new_block_id = new_blocks[0]["id"].replace("-", "") if new_blocks else ""
@@ -1271,7 +1267,9 @@ def create_app() -> FastAPI:
     @app.get("/links/status")
     def links_status():
         """JSON endpoint for link target checking + resolve progress."""
+        loading = _cache.get("notion_exceptions") is None
         return {
+            "loading": loading,
             "checking": _link_targets_checking[0],
             "targets": dict(_link_targets_status),
             "resolving": _resolve_progress["active"],
@@ -1280,8 +1278,6 @@ def create_app() -> FastAPI:
             "resolve_total": _resolve_progress["total"],
             "resolve_message": _resolve_progress["message"],
         }
-
-    @app.post("/links/resolve-all", response_class=HTMLResponse)
 
     @app.post("/links/resolve-all")
     def links_resolve_all(request: Request):
@@ -1689,7 +1685,7 @@ def create_app() -> FastAPI:
             from e2n.notion import paragraph_block, plain_text_span
             client.delete_block(block_id)
             block = paragraph_block([plain_text_span(decrypted_text[:2000])])
-            result = client._sdk_call(client._sdk_client.blocks.children.append, block_id=page_id, children=[block])
+            result = client._api(f"blocks/{page_id}/children", "PATCH", {"children": [block]})
             new_blocks = result.get("results", [])
             new_block_id = new_blocks[0]["id"].replace("-", "") if new_blocks else ""
             page_id_clean = page_id.replace("-", "")
@@ -1764,11 +1760,7 @@ def create_app() -> FastAPI:
                     for p in all_matches:
                         if p.title == exc["title"]:
                             try:
-                                client._sdk_call(
-                                    client._sdk_client.pages.update,
-                                    page_id=p.page_id,
-                                    properties={"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}},
-                                )
+                                client._api(f"pages/{p.page_id}", "PATCH", {"properties": {"Status": {"select": {"name": "Resolved"}}, "Link": {"url": None}}})
                             except Exception:
                                 pass
                     deleted += 1
@@ -1793,11 +1785,8 @@ def create_app() -> FastAPI:
         pages = [p for p in client.search_pages("Empty Title") if p.title == "Empty Title"]
         if pages:
             try:
-                client._sdk_call(
-                    client._sdk_client.pages.update,
-                    page_id=pages[0].page_id,
-                    properties={"Name": {"title": [{"text": {"content": new_title.strip()}}]}},
-                )
+                client._api(f"pages/{pages[0].page_id}", "PATCH", {"properties": {"Name": {"title": [{"text": {"content": new_title.strip()}}]}}})
+
             except Exception:
                 pass
         _invalidate_exceptions_cache()

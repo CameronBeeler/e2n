@@ -385,16 +385,11 @@ class NotionDatabaseRef:
 class NotionClient:
     """Migration-focused wrapper around the Notion Python SDK."""
 
-    def __init__(self, notion_key: str, sdk_client: Any | None = None) -> None:
-        if sdk_client is None:
-            try:
-                from notion_client import Client
-            except ImportError as exc:
-                raise NotionAPIError("Install notion-client to use Notion API features") from exc
-            sdk_client = Client(auth=notion_key, notion_version="2022-06-28")
-        self._sdk_client = sdk_client
+    def __init__(self, notion_key: str, **kwargs: Any) -> None:
+        self._notion_key = notion_key
         self._rate_lock = __import__("threading").Lock()
         self._last_request_time = 0.0
+
 
     def search_pages(self, query: str | None = None) -> list[NotionPageRef]:
         """Return pages shared with the integration, optionally filtered by title."""
@@ -411,7 +406,7 @@ class NotionClient:
             if start_cursor:
                 body["start_cursor"] = start_cursor
 
-            response = self._sdk_call(self._sdk_client.search, **body)
+            response = self._api("search", "POST", body)
             pages.extend(_page_ref(page) for page in response.get("results", []))
             if not response.get("has_more"):
                 return pages
@@ -432,7 +427,7 @@ class NotionClient:
             if start_cursor:
                 body["start_cursor"] = start_cursor
 
-            response = self._sdk_call(self._sdk_client.search, **body)
+            response = self._api("search", "POST", body)
             databases.extend(_database_ref(database) for database in response.get("results", []))
             if not response.get("has_more"):
                 return databases
@@ -444,7 +439,7 @@ class NotionClient:
             "parent": {"type": "page_id", "page_id": parent_page_id},
             "properties": {"title": [{"text": {"content": title}}]},
         }
-        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+        return _page_ref(self._api("pages", "POST", body))
 
     def create_workspace_page(self, title: str) -> NotionPageRef:
         """Create a top-level workspace page when the integration type allows it."""
@@ -452,7 +447,7 @@ class NotionClient:
             "parent": {"type": "workspace", "workspace": True},
             "properties": {"title": [{"text": {"content": title}}]},
         }
-        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+        return _page_ref(self._api("pages", "POST", body))
 
     def create_database(self, parent_page_id: str, title: str, properties: JsonObject) -> NotionDatabaseRef:
         """Create a child database under a Notion page with schema properties."""
@@ -472,7 +467,7 @@ class NotionClient:
                 IMPORT_TAGS_PROPERTY: import_tags_property(tags),
             },
         }
-        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+        return _page_ref(self._api("pages", "POST", body))
 
     def create_database_page(self, database_id: str, properties: JsonObject) -> NotionPageRef:
         """Create one database row page with custom properties."""
@@ -480,33 +475,34 @@ class NotionClient:
             "parent": {"database_id": database_id},
             "properties": properties,
         }
-        return _page_ref(self._sdk_call(self._sdk_client.pages.create, **body))
+        return _page_ref(self._api("pages", "POST", body))
 
     def update_page_properties(self, page_id: str, properties: JsonObject) -> NotionPageRef:
         """Update page/database-row properties."""
-        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, properties=properties))
+        return _page_ref(self._api(f"pages/{page_id}", "PATCH", {"properties": properties}))
 
     def retrieve_page_raw(self, page_id: str) -> JsonObject:
         """Retrieve raw page payload including properties."""
-        return self._sdk_call(self._sdk_client.pages.retrieve, page_id=page_id)
+        return self._api(f"pages/{page_id}", "GET")
 
     def list_block_children(self, block_id: str) -> list[JsonObject]:
         """List first-level child blocks for one block/page id."""
         children: list[JsonObject] = []
         start_cursor: str | None = None
         while True:
-            body: JsonObject = {"block_id": block_id, "page_size": 100}
+            path = f"blocks/{block_id}/children?page_size=100"
             if start_cursor:
-                body["start_cursor"] = start_cursor
-            response = self._sdk_call(self._sdk_client.blocks.children.list, **body)
+                path += f"&start_cursor={start_cursor}"
+            response = self._api(path, "GET")
             children.extend(response.get("results", []))
             if not response.get("has_more"):
                 return children
             start_cursor = response.get("next_cursor")
 
+
     def archive_page(self, page_id: str) -> NotionPageRef:
         """Archive one Notion page by id for cleanup workflows."""
-        return _page_ref(self._sdk_call(self._sdk_client.pages.update, page_id=page_id, archived=True))
+        return _page_ref(self._api(f"pages/{page_id}", "PATCH", {"archived": True}))
 
 
     def update_block_with_page_link(self, block_id: str, link_text: str, page_url: str) -> JsonObject:
@@ -597,25 +593,23 @@ class NotionClient:
         create_response = self._api("file_uploads", "POST", {})
         upload_id = create_response["id"]
 
-        # Step 2: Send file contents via form_data
         file_data = local_path.read_bytes()
-        self._sdk_call(
-            self._sdk_client.request,
-            path=f"file_uploads/{upload_id}/send",
-            method="POST",
-            form_data={"file": (local_path.name, file_data, content_type)},
+        # Step 2: Send file contents via multipart form
+        import httpx as _httpx
+        resp = _httpx.post(
+            f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
+            headers={"Authorization": f"Bearer {self._notion_key}", "Notion-Version": "2022-06-28"},
+            files={"file": (local_path.name, file_data, content_type)},
         )
+        if resp.status_code >= 400:
+            raise NotionAPIError(f"File upload failed: {resp.status_code} {resp.text[:200]}")
         return upload_id
 
     def append_blocks_batched(self, page_id: str, blocks: list[JsonObject]) -> None:
         """Append blocks to a page in Notion-safe batches of ≤100."""
         for i in range(0, len(blocks), 100):
             batch = blocks[i : i + 100]
-            self._sdk_call(
-                self._sdk_client.blocks.children.append,
-                block_id=page_id,
-                children=batch,
-            )
+            self._api(f"blocks/{page_id}/children", "PATCH", {"children": batch})
 
     def import_note_blocks(
         self,
@@ -645,13 +639,12 @@ class NotionClient:
         }
 
         try:
-            page = self._sdk_call(self._sdk_client.pages.create, **body)
+            page = self._api("pages", "POST", body)
         except NotionAPIError as exc:
             if "not a property that exists" in str(exc) and IMPORT_TAGS_PROPERTY in str(exc):
                 # Tags property doesn't exist on this database — retry without it
                 properties.pop(IMPORT_TAGS_PROPERTY, None)
-                body["properties"] = properties
-                page = self._sdk_call(self._sdk_client.pages.create, **body)
+                page = self._api("pages", "POST", body)
             else:
                 raise
 
@@ -665,39 +658,65 @@ class NotionClient:
     def delete_block(self, block_id: str) -> None:
         """Delete a block by ID. Handles already-deleted blocks gracefully."""
         try:
-            self._sdk_call(self._sdk_client.blocks.delete, block_id=block_id)
+            self._api(f"blocks/{block_id}", "DELETE")
         except NotionAPIError:
             pass  # Block already deleted or not found — acceptable
-
     def _api(self, path: str, method: str = "GET", body: JsonObject | None = None) -> JsonObject:
-        """Direct Notion API call bypassing SDK convenience method filters."""
-        kwargs: dict[str, Any] = {"path": path, "method": method}
-        if body is not None:
-            kwargs["body"] = body
-        return self._sdk_call(self._sdk_client.request, **kwargs)
+        """Direct Notion API call using httpx."""
+        # Allow test override
+        mock_fn = getattr(self, "_mock_request", None)
+        if mock_fn:
+            kwargs = {"path": path, "method": method}
+            if body is not None:
+                kwargs["body"] = body
+            try:
+                return mock_fn(**kwargs)
+            except NotionAPIError:
+                raise
+            except Exception as exc:
+                raise NotionAPIError(f"Notion API request failed: {exc}") from exc
 
 
-    def _sdk_call(self, sdk_method: Any, **kwargs: Any) -> JsonObject:
+
+
+
         import time
-        # Rate limit: minimum 350ms between requests (< 3 req/s)
+        import httpx as _httpx
         lock = getattr(self, "_rate_lock", None)
         if lock:
             with lock:
                 elapsed = time.time() - self._last_request_time
-                if elapsed < 0.35:
-                    time.sleep(0.35 - elapsed)
+                if elapsed < 0.5:
+                    time.sleep(0.5 - elapsed)
                 self._last_request_time = time.time()
-        # Retry on rate limit (429)
+        url = f"https://api.notion.com/v1/{path}"
+        headers = {"Authorization": f"Bearer {self._notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
         for attempt in range(3):
             try:
-                return sdk_method(**kwargs)
+                if method == "GET":
+                    resp = _httpx.get(url, headers=headers)
+                elif method == "POST":
+                    resp = _httpx.post(url, headers=headers, json=body)
+                elif method == "PATCH":
+                    resp = _httpx.patch(url, headers=headers, json=body)
+                elif method == "DELETE":
+                    resp = _httpx.delete(url, headers=headers)
+                else:
+                    raise NotionAPIError(f"Unsupported method: {method}")
+                if resp.status_code == 429:
+                    time.sleep(5.0 * (attempt + 1))
+                    continue
+                if resp.status_code >= 400:
+                    raise NotionAPIError(f"Notion API error {resp.status_code}: {resp.text[:300]}")
+                return resp.json()
+            except NotionAPIError:
+                raise
             except Exception as exc:
                 if "rate" in str(exc).lower() or "429" in str(exc):
-                    time.sleep(1.0 * (attempt + 1))
+                    time.sleep(5.0 * (attempt + 1))
                     continue
-                raise NotionAPIError(f"Notion SDK request failed: {exc}") from exc
+                raise NotionAPIError(f"Notion API request failed: {exc}") from exc
         raise NotionAPIError("Notion API rate limited after 3 retries")
-
 
 def multi_select_property(values: tuple[str, ...] | list[str]) -> JsonObject:
     """Build a Notion multi-select property value from unique non-empty values."""
@@ -853,20 +872,23 @@ def ensure_child_database(
     """
     existing = _find_child_database(client.search_databases(database_title), parent_page_id, database_title)
     if existing is not None:
-        # Ensure schema has all expected properties
+        # Update schema: ensure all properties exist and enforce order via direct API
         try:
-            props_to_add = {k: v for k, v in properties.items() if k != "Name" and k != "Note Name"}
-            if props_to_add:
-                client._sdk_call(
-                    client._sdk_client.databases.update,
-                    database_id=existing.database_id,
-                    properties=props_to_add,
+            import httpx
+            notion_key = getattr(client, "_notion_key", "")
+            if notion_key:
+                headers = {"Authorization": f"Bearer {notion_key}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+                props_payload = {k: v for k, v in properties.items() if k != "Name"}
+                httpx.patch(
+                    f"https://api.notion.com/v1/databases/{existing.database_id}",
+                    headers=headers, json={"properties": props_payload},
                 )
         except Exception as exc:
             import logging
             logging.getLogger("e2n.notion").warning("Could not update database schema: %s", exc)
         return existing
     return client.create_database(parent_page_id, database_title, properties)
+
 
 
 def create_exception_row(
@@ -906,7 +928,7 @@ def create_exception_row(
     }
 
     try:
-        response = client._sdk_call(client._sdk_client.pages.create, **body)
+        response = client._api("pages", "POST", body)
         return response["id"]
     except NotionAPIError as exc:
         if "not a property that exists" in str(exc):
@@ -916,7 +938,7 @@ def create_exception_row(
                 "properties": {"title": {"title": [{"text": {"content": note_name}}]}},
             }
             try:
-                response = client._sdk_call(client._sdk_client.pages.create, **fallback_body)
+                response = client._api("pages", "POST", fallback_body)
                 return response["id"]
             except Exception:
                 pass

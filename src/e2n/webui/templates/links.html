@@ -145,13 +145,18 @@
       } else {
         progDiv.style.display = 'none';
       }
+      // Handle loading state (exceptions being fetched from Notion)
+      if (data.loading && !data.resolving) {
+        progDiv.style.display = "block";
+        progDiv.textContent = "⏳ Loading exceptions from Notion...";
+      }
       // Handle target checking
       var msg = document.getElementById('checking-msg');
       if (data.checking && msg) {
         var resolved = Object.values(data.targets).filter(function(s){return s !== 'pending'}).length;
         var total = Object.keys(data.targets).length;
         msg.textContent = '⏳ Checking link targets... (' + resolved + '/' + total + ' done)';
-      } else if (!data.checking && !data.resolving) {
+      } else if (!data.checking && !data.resolving && !data.loading) {
         clearInterval(interval);
         window.location.reload();
       }
