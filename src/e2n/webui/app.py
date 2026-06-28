@@ -731,9 +731,16 @@ def create_app() -> FastAPI:
                 if not results.get("has_more"):
                     break
                 body = {"start_cursor": results["next_cursor"]}
+            import logging; logging.getLogger("e2n.webui").info("Loaded %d exceptions from Notion", len(exceptions))
             _cache["notion_exceptions"] = exceptions
             return exceptions
-        except Exception:
+        except Exception as exc:
+            import logging
+            logging.getLogger("e2n.webui").warning("_load_exceptions_from_notion failed: %s (loaded %d so far)", exc, len(exceptions))
+            # Cache whatever we got so far (partial is better than empty)
+            if exceptions:
+                _cache["notion_exceptions"] = exceptions
+            return exceptions
             return []
 
     @app.post("/refresh")
