@@ -405,6 +405,8 @@ def create_app() -> FastAPI:
                                             note_resource_map[seg.value] = f"upload:{upload_id}"
                                         except Exception as upload_err:
                                             log.warning("Upload failed for %s: %s", local_path.name, upload_err)
+                                            # Track as resource exception with local file path
+                                            note_resource_map[seg.value] = f"local:{local_path}"
 
                             blocks, exceptions = segments_to_notion_blocks(
                                 segments, note_resource_map, note_id=note.note_id, note_title=note.title
@@ -588,21 +590,118 @@ def create_app() -> FastAPI:
         # Override counts from Notion if available (more accurate post-import)
         notion_exceptions = _load_exceptions_from_notion()
         if notion_exceptions:
-            total_exceptions = len(notion_exceptions)
-            total_link_exceptions = sum(1 for e in notion_exceptions if "Evernote Link" in e.get("reasons", ""))
-            total_encrypted = sum(1 for e in notion_exceptions if "Encrypted" in e.get("reasons", ""))
-
-        return templates.TemplateResponse(
-            request=request,
-            name="wizard_step5.html",
-            context={
-                "sources": sources_summary,
-                "total_imported": total_imported,
-                "total_exceptions": total_exceptions,
-                "total_link_exceptions": total_link_exceptions,
-                "total_encrypted": total_encrypted,
-            },
-        )
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
+            ext_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+                ".pdf": "application/pdf", ".mp3": "audio/mpeg", ".wav": "audio/wav",
+                ".mp4": "video/mp4", ".mov": "video/quicktime",
+                ".zip": "application/zip", ".doc": "application/msword",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".ppt": "application/vnd.ms-powerpoint", ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".txt": "text/plain", ".csv": "text/csv", ".json": "application/json",
+                ".html": "text/html", ".htm": "text/html", ".xml": "application/xml",
+                ".drawio": "application/xml", ".ics": "text/calendar",
+            }
+            content_type = ext_map.get(local_path.suffix.lower(), "application/octet-stream")
 
 
     # --- Resolution Workbench routes ---
@@ -663,19 +762,32 @@ def create_app() -> FastAPI:
 
 
 
+
     def _get_import_db_ids(client: NotionClient, notion_key: str) -> set[str]:
-        """Get the set of import database IDs (under 'Evernote Import' page)."""
+        """Get the set of import database IDs (under 'Evernote Import' page, possibly nested)."""
         if _cache.get("import_db_ids") is not None:
             return set(_cache["import_db_ids"])
         notion_root = _wizard_state.get("notion_root", "") or os.environ.get("NOTION_ROOT", "")
         try:
             br = bootstrap_notion_pages(notion_key, root_title=notion_root if notion_root else None)
-            # List children of the import page to find databases
             children = client.list_block_children(br.converted.page_id)
-            import_dbs = {c["id"] for c in children if c.get("type") == "child_database"}
+            child_types = [c.get("type") for c in children]
+            logging.getLogger("e2n.webui").info("Import page children: %d items, types: %s", len(children), child_types)
+            import_dbs: set[str] = set()
+            for c in children:
+                if c.get("type") == "child_database":
+                    import_dbs.add(c["id"])
+                elif c.get("type") == "child_page":
+                    # Databases may be nested inside child pages
+                    sub_children = client.list_block_children(c["id"])
+                    for sc in sub_children:
+                        if sc.get("type") == "child_database":
+                            import_dbs.add(sc["id"])
+            logging.getLogger("e2n.webui").info("Found %d import database(s)", len(import_dbs))
             _cache["import_db_ids"] = list(import_dbs)
             return import_dbs
-        except Exception:
+        except Exception as exc:
+            logging.getLogger("e2n.webui").warning("_get_import_db_ids failed: %s", exc)
             return set()
 
     def _load_exceptions_from_notion() -> list[dict]:
